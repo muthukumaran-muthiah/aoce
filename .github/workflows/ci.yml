@@ -8,11 +8,35 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      AOCE_TEST_ADMIN_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
       - uses: actions/checkout@v4
+      # Same Postgres setup as the demo's astronomy-db: pg_stat_statements preloaded.
+      - name: Start Postgres
+        run: |
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres \
+            postgres:18 -c shared_preload_libraries=pg_stat_statements
+          until docker exec pg pg_isready -U postgres; do sleep 1; done
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
       - run: pip install -e ".[dev]"
       - run: pytest -q
+
+  chart:
+    # Renders the demo chart with our values so a bad values.yaml fails here, not on `tilt up`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+      - name: Render OpenTelemetry Demo with deploy/otel-demo/values.yaml
+        run: |
+          helm repo add open-telemetry https://open-telemetry.github.io/opentelemetry-helm-charts
+          helm template otel-demo open-telemetry/opentelemetry-demo --version 0.42.3 \
+            -n otel-demo -f deploy/otel-demo/values.yaml > rendered.yaml
+          grep -q "url: http://aoce-agent.aoce:8000/alerts" rendered.yaml
+          grep -q "alert: HighErrorRate" rendered.yaml
+          grep -q "alertmanagers:" rendered.yaml
+          grep -A3 "kind: StatefulSet" rendered.yaml | grep -q "name: alertmanager"

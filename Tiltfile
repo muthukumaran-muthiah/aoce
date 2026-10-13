@@ -50,6 +50,8 @@ k8s_resource('frontend-proxy', labels=['demo'], port_forwards=['8080:8080'], obj
 k8s_resource('prometheus', labels=['observability'], port_forwards=['9090:9090'],
     links=[link('http://localhost:9090/', 'Prometheus')])
 k8s_resource('jaeger', labels=['observability'])
+k8s_resource('alertmanager', labels=['observability'], port_forwards=['9093:9093'],
+    links=[link('http://localhost:9093/', 'Alertmanager')])
 k8s_resource('grafana', labels=['observability'])
 k8s_resource('opensearch', labels=['observability'], port_forwards=['9200:9200'])
 k8s_resource('otel-collector-agent', labels=['observability'])
