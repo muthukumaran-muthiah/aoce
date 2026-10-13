@@ -1,0 +1,94 @@
+# Helm values for the OpenTelemetry Demo (chart open-telemetry/opentelemetry-demo 0.42.3, app 3.1.0).
+# Deployed by the Tiltfile into namespace "otel-demo".
+#
+# Resources: the chart only sets memory limits, so Kubernetes reserves the full
+# limit for every pod (~7 GB) and the last pods stay Pending on a laptop cluster.
+# Here every service gets an explicit request (what the scheduler reserves) and
+# a limit (hard cap). CPU requests are required for the HPAs in hpa.yaml and are
+# kept small (~0.7 CPU in total) to fit Rancher Desktop's default 2-CPU VM.
+
+components:
+  # Demo's own AI agent / chatbot / MCP: off. Our product is the agent.
+  agent:
+    enabled: false
+  chatbot:
+    enabled: false
+  mcp:
+    enabled: false
+
+  # --- Stateless request-path services (autoscaled, see hpa.yaml) ---
+  frontend:
+    resources: {requests: {cpu: 50m, memory: 150Mi}, limits: {memory: 300Mi}}
+  frontend-proxy:
+    resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 128Mi}}
+  ad:
+    resources: {requests: {cpu: 20m, memory: 200Mi}, limits: {memory: 400Mi}}
+  cart:
+    resources: {requests: {cpu: 20m, memory: 100Mi}, limits: {memory: 200Mi}}
+  checkout:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 64Mi}}
+  currency:
+    resources: {requests: {cpu: 20m, memory: 16Mi}, limits: {memory: 40Mi}}
+  email:
+    resources: {requests: {cpu: 20m, memory: 64Mi}, limits: {memory: 128Mi}}
+  image-provider:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 64Mi}}
+  payment:
+    resources: {requests: {cpu: 20m, memory: 100Mi}, limits: {memory: 180Mi}}
+  product-catalog:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 64Mi}}
+  quote:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 64Mi}}
+  recommendation:
+    resources: {requests: {cpu: 20m, memory: 128Mi}, limits: {memory: 500Mi}}
+  shipping:
+    resources: {requests: {cpu: 20m, memory: 16Mi}, limits: {memory: 40Mi}}
+
+  # --- Async consumers (single replica: scaling Kafka consumers changes the failure scenarios) ---
+  accounting:
+    resources: {requests: {cpu: 20m, memory: 100Mi}, limits: {memory: 200Mi}}
+  fraud-detection:
+    resources: {requests: {cpu: 20m, memory: 200Mi}, limits: {memory: 400Mi}}
+
+  # --- Stateful / singletons (fixed 1 replica) ---
+  astronomy-db:
+    resources: {requests: {cpu: 20m, memory: 100Mi}, limits: {memory: 256Mi}}
+  kafka:
+    resources: {requests: {cpu: 50m, memory: 400Mi}, limits: {memory: 800Mi}}
+  valkey-cart:
+    resources: {requests: {cpu: 10m, memory: 20Mi}, limits: {memory: 64Mi}}
+  flagd:
+    resources: {requests: {cpu: 20m, memory: 50Mi}, limits: {memory: 100Mi}}
+  opamp-server:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 80Mi}}
+  telemetry-docs:
+    resources: {requests: {cpu: 20m, memory: 32Mi}, limits: {memory: 100Mi}}
+
+  # --- Traffic generator ---
+  load-generator:
+    resources: {requests: {cpu: 50m, memory: 300Mi}, limits: {memory: 1000Mi}}
+
+# --- Observability stack ---
+opentelemetry-collector:
+  resources: {requests: {cpu: 20m, memory: 200Mi}, limits: {memory: 500Mi}}
+
+jaeger:
+  jaeger:
+    resources: {requests: {cpu: 50m, memory: 300Mi}, limits: {memory: 600Mi}}
+
+prometheus:
+  # Needed later for AOCE-21 (alerts -> agent webhook).
+  alertmanager:
+    enabled: false
+  server:
+    resources: {requests: {cpu: 50m, memory: 250Mi}, limits: {memory: 500Mi}}
+
+grafana:
+  # Restarted 3x on the first run: raise the cap.
+  resources: {requests: {cpu: 50m, memory: 150Mi}, limits: {memory: 400Mi}}
+  sidecar:
+    resources: {requests: {cpu: 10m, memory: 50Mi}, limits: {cpu: 150m, memory: 256Mi}}
+
+opensearch:
+  # OOM-killed at 1100Mi on first boot: raise the cap.
+  resources: {requests: {cpu: 50m, memory: 800Mi}, limits: {memory: 1536Mi}}

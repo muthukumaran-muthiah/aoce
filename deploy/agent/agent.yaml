@@ -1,0 +1,39 @@
+# The AOCE agent API (AOCE-24). Deployed by the Tiltfile into namespace "aoce".
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aoce-agent
+  namespace: aoce
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: aoce-agent}
+  template:
+    metadata:
+      labels: {app: aoce-agent}
+    spec:
+      containers:
+        - name: agent
+          image: aoce-agent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef: {name: aoce-anthropic, key: ANTHROPIC_API_KEY, optional: true}
+          readinessProbe:
+            httpGet: {path: /healthz, port: 8000}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: aoce-agent
+  namespace: aoce
+spec:
+  selector: {app: aoce-agent}
+  ports:
+    - port: 8000
+      targetPort: 8000
