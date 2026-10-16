@@ -21,6 +21,10 @@ class LLMClient:
         self.settings = settings
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
 
+    async def aclose(self) -> None:
+        """Close the HTTP connection pool."""
+        await self._client.close()
+
     async def create(
         self,
         messages: list[dict[str, Any]],

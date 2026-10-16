@@ -4,6 +4,8 @@ import asyncio
 import json
 import logging
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -18,7 +20,6 @@ from aoce.tools import build_registry
 
 log = logging.getLogger("aoce")
 
-app = FastAPI(title="AI On-Call Engineer", version="0.1.0")
 tools = build_registry(get_settings())
 
 
@@ -41,6 +42,35 @@ def make_investigator() -> Investigator | None:
     if settings.anthropic_api_key is None:
         return None
     return Investigator(LLMClient(settings), tools, settings)
+
+
+# One investigator, and so one Anthropic client and connection pool, for the life of the process
+# (AOCE-65). Built on first use, closed on shutdown.
+_investigator: Investigator | None = None
+_investigator_built = False
+
+
+def get_investigator() -> Investigator | None:
+    global _investigator, _investigator_built
+    if not _investigator_built:
+        _investigator, _investigator_built = make_investigator(), True
+    return _investigator
+
+
+async def close_investigator() -> None:
+    global _investigator, _investigator_built
+    if _investigator is not None:
+        await _investigator.aclose()
+    _investigator, _investigator_built = None, False
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    yield
+    await close_investigator()
+
+
+app = FastAPI(title="AI On-Call Engineer", version="0.1.0", lifespan=lifespan)
 
 
 async def run_investigation(incident: Incident, investigator: Investigator) -> None:
@@ -72,7 +102,7 @@ async def healthz() -> dict[str, str]:
 async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
     """Accept an Alertmanager webhook and open one incident per firing alert."""
     opened = []
-    investigator = make_investigator()
+    investigator = get_investigator()
     for alert in payload.alerts:
         if alert.status != "firing":
             continue

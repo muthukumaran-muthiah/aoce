@@ -6,9 +6,12 @@ handler. Handlers return plain dicts; every result carries the exact query that 
 """
 
 import json
+import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+
+log = logging.getLogger("aoce.tools")
 
 Handler = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
 
@@ -50,9 +53,14 @@ class ToolRegistry:
             return f"unknown tool: {name}", True
         try:
             result = await tool.handler(tool_input)
+            return json.dumps(result, default=str), False
         except ToolError as e:
             return str(e), True
-        return json.dumps(result, default=str), False
+        except Exception as e:
+            # A bug or an unexpected backend reply (KeyError, bad JSON) is one failed check, not a failed
+            # investigation: log it and let the model try another hypothesis (AOCE-60).
+            log.exception("tool %s raised", name)
+            return f"{name} failed unexpectedly: {type(e).__name__}: {e}"[:500], True
 
 
 def build_registry(settings) -> ToolRegistry:

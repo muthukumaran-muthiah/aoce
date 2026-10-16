@@ -64,3 +64,20 @@ async def test_refusal_raises():
     llm = LLMClient(Settings(model="claude-opus-5-5"), client=client)
     with pytest.raises(LLMRefusalError, match="cyber"):
         await llm.create([{"role": "user", "content": "hi"}])
+
+
+async def test_aclose_closes_the_http_client():
+    closed = []
+
+    async def close():
+        closed.append(True)
+
+    llm = LLMClient(Settings(anthropic_api_key="k"), client=SimpleNamespace(close=close))
+    await llm.aclose()
+    assert closed == [True]
+
+
+async def test_real_client_can_be_closed():
+    llm = LLMClient(Settings(anthropic_api_key="k"))
+    await llm.aclose()
+    assert llm._client.is_closed()
