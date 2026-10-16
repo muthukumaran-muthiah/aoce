@@ -4,8 +4,13 @@ Missing indexes, slow queries and lock contention were the root cause in 3 of 6 
 interviews, and on-call engineers often lack DB access at night. This tool connects as a monitoring
 role (pg_monitor in the OTel Demo), forces every transaction read-only with a statement timeout, and
 never kills sessions or writes.
+
+pg_stat_activity holds the live query text with its literal values (emails, tokens, order IDs), so
+those queries pass through redact_query before they reach the model or the incident trace (AOCE-39).
+pg_stat_statements text is already normalised by Postgres.
 """
 
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -103,6 +108,7 @@ open longer than 30 seconds. Use this first when a service backed by the databas
 - seq_scans: tables with at least 1000 rows read by sequential scans, a sign of a missing index.
 - connections: connection count by state and by client versus max_connections.
 - overview: all of the above in one call.
+Literal values in query text are replaced with $1, $2, ... placeholders.
 Returns rows plus the SQL that produced them so you can cite it."""
 
 INPUT_SCHEMA = {
@@ -114,6 +120,45 @@ INPUT_SCHEMA = {
     "required": ["check", "limit"],
     "additionalProperties": False,
 }
+
+
+# One token per match: identifiers and parameters are kept, literals are replaced.
+_SQL_TOKEN = re.compile(
+    r"""
+      (?P<ident>"(?:[^"]|"")*"?)                              # "quoted identifier"
+    | (?P<param>\$\d+)                                        # existing $1 parameter
+    | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*|)\$.*?(?:\$(?P=tag)\$|\Z))  # $tag$ ... $tag$
+    | (?P<estring>(?<!\w)[eE]'(?:[^'\\]|''|\\.)*(?:'|\Z))           # E'...' with backslash escapes
+    | (?P<string>(?:(?<!\w)(?:[bBxXnN]|[uU]&))?'(?:[^']|'')*(?:'|\Z))     # '...', B'...', U&'...'
+    | (?P<number>(?<![\w$.])(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)  # 42, 3.14, 1e9
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def redact_query(query: str | None) -> str | None:
+    """Replace literal values in SQL text with $n placeholders, as pg_stat_statements does.
+
+    The text may be cut mid-literal (the SQL keeps 300 characters), so an unterminated string is
+    redacted to the end. Numbering continues after the highest parameter already in the query.
+    """
+    if not query:
+        return query
+    params = [int(m.group(0)[1:]) for m in _SQL_TOKEN.finditer(query) if m.lastgroup == "param"]
+    counter = max(params, default=0)
+
+    def replace(m: re.Match) -> str:
+        nonlocal counter
+        if m.group("ident") is not None or m.group("param") is not None:
+            return m.group(0)
+        counter += 1
+        return f"${counter}"
+
+    return _SQL_TOKEN.sub(replace, query)
+
+
+def _redact_rows(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    return [{**row, field: redact_query(row[field])} for row in rows]
 
 
 def _clean(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -135,10 +180,10 @@ async def _slow_queries(conn, limit: int) -> dict[str, Any]:
 
 
 async def _blocking(conn, limit: int) -> dict[str, Any]:
-    blocked = await _fetch(conn, BLOCKED_SQL, {"limit": limit})
+    blocked = _redact_rows(await _fetch(conn, BLOCKED_SQL, {"limit": limit}), "query")
     pids = sorted({pid for row in blocked for pid in row["blocked_by"]})
-    blockers = await _fetch(conn, BLOCKERS_SQL, {"pids": pids}) if pids else []
-    long_tx = await _fetch(conn, LONG_TRANSACTIONS_SQL, {"limit": limit})
+    blockers = _redact_rows(await _fetch(conn, BLOCKERS_SQL, {"pids": pids}), "last_query") if pids else []
+    long_tx = _redact_rows(await _fetch(conn, LONG_TRANSACTIONS_SQL, {"limit": limit}), "last_query")
     return {
         "blocked_sessions": blocked,
         "blockers": blockers,

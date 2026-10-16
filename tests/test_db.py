@@ -74,7 +74,7 @@ async def test_blocking_names_the_lock_holder(monitoring_url):
     waiter = await psycopg.AsyncConnection.connect(admin_db, autocommit=True, application_name="product-catalog")
     try:
         await holder.execute("LOCK TABLE catalog.products IN ACCESS EXCLUSIVE MODE")
-        waiting = asyncio.create_task(waiter.execute("SELECT * FROM catalog.products"))
+        waiting = asyncio.create_task(waiter.execute("SELECT * FROM catalog.products WHERE name = 'jane@example.com'"))
         for _ in range(50):
             out = await run(url, "blocking")
             if out["blocking"]["blocked_sessions"]:
@@ -83,6 +83,8 @@ async def test_blocking_names_the_lock_holder(monitoring_url):
 
         blocked = out["blocking"]["blocked_sessions"]
         assert [b["application_name"] for b in blocked] == ["product-catalog"]
+        assert blocked[0]["query"] == "SELECT * FROM catalog.products WHERE name = $1"
+        assert "jane@example.com" not in json.dumps(out)
         (blocker,) = out["blocking"]["blockers"]
         assert blocker["application_name"] == "lock-holder"
         assert "AccessExclusiveLock on catalog.products" in blocker["locks_held"]
