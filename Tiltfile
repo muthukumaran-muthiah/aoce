@@ -96,6 +96,8 @@ if not AOCE_WEBHOOK_TOKEN:
     warn('AOCE_WEBHOOK_TOKEN is not set: the agent rejects every alert. Add it to .env (e.g. openssl rand -hex 32).')
 if not AOCE_API_KEY:
     warn('AOCE_API_KEY is not set: /incidents and /tools are turned off. Add it to .env to read incidents.')
+if AOCE_WEBHOOK_TOKEN and AOCE_WEBHOOK_TOKEN == AOCE_API_KEY:
+    warn('AOCE_WEBHOOK_TOKEN and AOCE_API_KEY are equal: Alertmanager could read incidents. Use two different values.')
 k8s_yaml(secret_from_dict('aoce-auth', namespace=AOCE_NS,
     inputs={'AOCE_WEBHOOK_TOKEN': AOCE_WEBHOOK_TOKEN, 'AOCE_API_KEY': AOCE_API_KEY}))
 k8s_yaml(secret_from_dict('aoce-webhook', namespace=OTEL_DEMO_NS, inputs={'token': AOCE_WEBHOOK_TOKEN}))
@@ -130,7 +132,7 @@ def agent_manifests():
                 {'name': k, 'value': v} for k, v in AGENT_SETTINGS.items()]
             # Restart the pod when a secret changes (the secret alone would not).
             pod['metadata'].setdefault('annotations', {})['aoce/api-key-hash'] = str(
-                hash(ANTHROPIC_API_KEY + AOCE_WEBHOOK_TOKEN + AOCE_API_KEY))
+                hash('|'.join([ANTHROPIC_API_KEY, AOCE_WEBHOOK_TOKEN, AOCE_API_KEY])))
     return encode_yaml_stream(objs)
 
 docker_build('aoce-agent', '.', only=['pyproject.toml', 'README.md', 'src'])

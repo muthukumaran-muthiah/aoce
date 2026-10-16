@@ -5,6 +5,7 @@ them; people and scripts use the API key for /incidents and /tools. An unset sec
 endpoints off rather than leaving them open.
 """
 
+import logging
 import secrets
 from collections.abc import Callable
 
@@ -14,6 +15,7 @@ from pydantic import SecretStr
 
 from aoce.config import Settings, get_settings
 
+log = logging.getLogger("aoce")
 _bearer = HTTPBearer(auto_error=False)
 
 
@@ -21,7 +23,9 @@ def _require(env_var: str, secret_of: Callable[[Settings], SecretStr | None]):
     async def check(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
         expected = secret_of(get_settings())
         if expected is None or not expected.get_secret_value():
-            raise HTTPException(status.HTTP_403_FORBIDDEN, detail=f"disabled: set {env_var} to enable")
+            # Name the setting only in our log, not to an unauthenticated caller.
+            log.warning("rejected a request: %s is not set, so this endpoint is turned off", env_var)
+            raise HTTPException(status.HTTP_403_FORBIDDEN, detail="disabled")
         given = credentials.credentials if credentials else ""
         if not secrets.compare_digest(given.encode(), expected.get_secret_value().encode()):
             raise HTTPException(
