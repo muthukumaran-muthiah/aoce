@@ -1,0 +1,660 @@
+# Failure catalogue (AOCE-22): ground truth for the benchmark (AOCE-42) and its scoring (AOCE-43).
+#
+# One entry per flagd flag in the OpenTelemetry Demo we deploy (Helm chart 0.42.3, app 3.1.0).
+# Mechanisms and root causes are read from the demo's source at that tag; `source` links each one.
+# Expected symptoms are derived from that source plus our deploy/otel-demo/values.yaml (resource
+# limits, alert rules). They have not been observed on a live run yet: `verified: false` until a
+# `tilt up` run confirms them, at which point fix whatever was wrong and set `verified: true`.
+#
+# Fields
+#   flag / variant      what to switch on at http://localhost:8080/feature, and to which variant
+#   tier                benchmark: candidate for the 10-scenario benchmark (AOCE-42)
+#                       extra:     usable, but overlaps a benchmark scenario
+#                       not_a_fault / not_observable / out_of_scope: do not use for scoring
+#   culprit             the service whose code or state is at fault (what the report must name)
+#   root_cause          the true cause, stated as an engineer would put it in a postmortem
+#   mechanism           exactly what the injected code does
+#   alerts              which of our Prometheus rules should fire, on which service_name.
+#                       Rules: HighErrorRate (>5% of SERVER spans failed, 2m rate, for 1m) and
+#                       HighLatencyP95 (SERVER p95 > 1s, 2m window, for 2m). [] = the agent is
+#                       never paged with the current rules.
+#   symptoms            metrics / traces / logs / db / k8s the agent should be able to find
+#   decisive_evidence   the evidence that separates the true cause from the red herrings
+#   red_herrings        plausible wrong answers; a report that lands on one of these is wrong
+#   grading             must_identify: facts the report must state for full credit
+#                       (naming only the flag, with no mechanism, is partial credit at best)
+#   tools               agent tools needed: query_metrics (AOCE-25, built), db_diagnostics (AOCE-57,
+#                       built), search_logs (AOCE-26), get_traces (AOCE-27), recent_changes (AOCE-28),
+#                       k8s_state (no ticket yet: pod restarts, OOMKilled, HPA replicas)
+#   giveaway_logs       log lines that name the flag outright. AOCE-42 must decide whether these
+#                       stay visible to the agent; with them, log search alone solves the scenario.
+#
+# Metric names under `symptoms.metrics` that are not span metrics (k8s_*, kafka_*, jvm_*) arrive in
+# Prometheus over OTLP from the collector's kubeletstats, k8s_cluster and kafkametrics receivers; their
+# exact Prometheus names are to be confirmed on the live run.
+
+demo:
+  chart: open-telemetry/opentelemetry-demo 0.42.3
+  app_version: 3.1.0
+  source: https://github.com/open-telemetry/opentelemetry-demo/tree/3.1.0
+  flag_config: https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/flagd/demo.flagd.json
+  load: load-generator with 5 users (4-5 HTTP users, 0-1 Playwright browser user), autostarted
+
+scenarios:
+  - flag: productCatalogLockContention
+    variant: "on"
+    tier: benchmark
+    category: database
+    culprit: astronomy-db (lock held by product-catalog)
+    root_cause: >-
+      A transaction from product-catalog holds an ACCESS EXCLUSIVE lock on catalog.products for 30s at
+      a time and re-takes it within 10s of releasing it, so every product read blocks behind it.
+    mechanism: >-
+      Every 10s product-catalog checks the flag; if set and no lock is held it opens a transaction,
+      runs LOCK TABLE catalog.products IN ACCESS EXCLUSIVE MODE and sits idle in that transaction for
+      30s, then rolls back. Reads (ListProducts, GetProduct, SearchProducts) queue behind the lock with
+      no query timeout, so they wait up to 30s instead of failing.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/product-catalog/main.go#L446-L485
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/postgresql/init.sql#L77-L81
+    alerts:
+      - {rule: HighLatencyP95, service: product-catalog}
+      - {rule: HighLatencyP95, service: frontend, likely: true}
+      - {rule: HighLatencyP95, service: recommendation, likely: true}
+      - {rule: HighLatencyP95, service: checkout, likely: true}
+    symptoms:
+      metrics:
+        - product-catalog p95 latency jumps from milliseconds to many seconds (up to ~30s), error rate stays low
+        - callers of product-catalog (frontend, recommendation, checkout) slow down at the same moment
+      traces:
+        - product-catalog server spans are long; their child DB client spans (SELECT ... FROM catalog.products) account for nearly all of the time
+      logs:
+        - 'product-catalog: "lock contention scenario active: holding ACCESS EXCLUSIVE lock on catalog.products"'
+      db:
+        - db_diagnostics blocking shows product-catalog SELECTs waiting (wait_event_type Lock, wait_event relation)
+        - the blocker is user astronomy_user, state "idle in transaction", last_query "LOCK TABLE catalog.products IN ACCESS EXCLUSIVE MODE", locks_held AccessExclusiveLock on catalog.products
+        - the blocker's transaction is at most 30s old, so it can miss the long_transactions list (threshold >30s); it is found through blocked_by
+    decisive_evidence: >-
+      The blocking chain in pg_locks/pg_stat_activity: SELECTs on catalog.products blocked by one
+      session holding AccessExclusiveLock while idle in transaction.
+    red_herrings:
+      - slow query or missing index (the queries are fast once the lock is released; seq_scans shows nothing unusual)
+      - product-catalog CPU or memory saturation
+      - frontend or network latency
+    grading:
+      must_identify:
+        - lock contention on catalog.products (astronomy-db), not slow queries
+        - the blocking session holds an ACCESS EXCLUSIVE lock while idle in transaction
+        - the blocker comes from product-catalog's own connection (astronomy_user)
+      recommended_action: end the blocking transaction and remove the code path that takes the table lock (turn off productCatalogLockContention)
+    tools: [query_metrics, db_diagnostics, get_traces, search_logs]
+    giveaway_logs: ["lock contention scenario active"]
+    verified: false
+
+  - flag: paymentFailure
+    variant: "50%"
+    tier: benchmark
+    category: error_rate
+    culprit: payment
+    root_cause: >-
+      payment rejects a share of Charge requests (the variant's percentage) with "Invalid token",
+      and every rejected charge fails the customer's order in checkout.
+    mechanism: >-
+      In charge.js, if the flag value n > 0 and Math.random() < n, payment sets
+      demo.user_context.loyalty_level=gold on the span and throws "Payment request failed. Invalid
+      token. demo.user_context.loyalty_level=gold". The 90% variant is actually 0.95.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/payment/charge.js#L40-L50
+    alerts:
+      - {rule: HighErrorRate, service: payment}
+      - {rule: HighErrorRate, service: checkout}
+      - {rule: HighErrorRate, service: frontend, likely: true}
+    symptoms:
+      metrics:
+        - payment error rate is close to the variant's percentage; request rate unchanged
+        - checkout error rate rises by about the same share (PlaceOrder fails with "failed to charge card")
+      traces:
+        - failed payment Charge spans carry demo.user_context.loyalty_level=gold and the exception "Invalid token"
+        - checkout PlaceOrder spans fail with "failed to charge card ... Payment request failed. Invalid token"
+      logs:
+        - 'payment: errors containing "Payment request failed. Invalid token"'
+    decisive_evidence: >-
+      The error starts in payment's own Charge spans (not in a client span to an unreachable host),
+      and every failed charge carries loyalty_level=gold.
+    red_herrings:
+      - checkout as the culprit (it only propagates payment's error)
+      - payment unreachable or network failure (payment answers; its request rate is normal)
+    grading:
+      must_identify:
+        - payment is the failing service and checkout only propagates its errors
+        - failures are payment rejecting charges ("Invalid token"), not payment being down
+        - the share of failing charges (about the variant's percentage)
+      recommended_action: turn off paymentFailure / roll back the payment change that rejects charges
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: []
+    verified: false
+
+  - flag: paymentUnreachable
+    variant: "on"
+    tier: benchmark
+    category: dependency_down
+    culprit: checkout (calls a non-existent payment address)
+    root_cause: >-
+      checkout sends Charge requests to badAddress:50051 instead of the payment service, so every
+      order fails with a connection error and payment receives no traffic at all.
+    mechanism: >-
+      In chargeCard, when the flag is on checkout builds a gRPC client for "badAddress:50051" and
+      calls Charge on it; the call fails with codes.Unavailable (name resolution fails), and
+      PlaceOrder returns "failed to charge card: could not charge the card: ...".
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/checkout/main.go#L573-L589
+    alerts:
+      - {rule: HighErrorRate, service: checkout}
+      - {rule: HighErrorRate, service: frontend, likely: true}
+    symptoms:
+      metrics:
+        - checkout error rate near 100% for PlaceOrder
+        - payment request rate drops to zero while payment itself shows no errors
+      traces:
+        - checkout's client span for PaymentService/Charge targets badAddress:50051 and fails with Unavailable; there is no payment server span under it
+      logs:
+        - 'checkout: "failed to charge card: could not charge the card: rpc error: code = Unavailable ..." mentioning badAddress'
+    decisive_evidence: >-
+      payment's request rate falls to zero exactly when checkout errors start, and checkout's
+      outbound Charge spans point at badAddress:50051 rather than the payment service.
+    red_herrings:
+      - payment crashed or rejecting requests (payment pods are healthy and simply get no traffic)
+      - a payment deploy (nothing changed in payment)
+    grading:
+      must_identify:
+        - checkout cannot reach payment; payment itself is healthy but idle
+        - checkout is calling the wrong address (badAddress:50051), i.e. a checkout configuration fault
+      recommended_action: fix checkout's payment address (turn off paymentUnreachable)
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: []
+    verified: false
+
+  - flag: productCatalogFailure
+    variant: "on (edit targeting: see note)"
+    note: >-
+      The flag's targeting returns "off" on both branches, so switching the default variant in the
+      flagd UI does nothing. In the flagd UI's JSON/advanced editor set targeting.if[1] to "on"
+      (the branch for product_id == "OLJCESPC7Z").
+    tier: benchmark
+    category: error_rate
+    culprit: product-catalog
+    root_cause: >-
+      product-catalog fails GetProduct for one product, OLJCESPC7Z (National Park Foundation
+      Explorascope), so its product page and any checkout with it in the cart fail.
+    mechanism: >-
+      GetProduct evaluates the flag with product_id in the evaluation context; for OLJCESPC7Z it sets
+      the span to error and returns codes.Internal "Error: Product Catalog Fail Feature Flag Enabled".
+      All other products and ListProducts work.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/product-catalog/main.go#L389-L401
+    alerts:
+      - {rule: HighErrorRate, service: product-catalog, likely: true}
+      - {rule: HighErrorRate, service: checkout, likely: true}
+    symptoms:
+      metrics:
+        - product-catalog error rate rises to roughly the share of its calls that are GetProduct(OLJCESPC7Z); may sit near the 5% threshold
+        - checkout errors for orders containing that product
+      traces:
+        - every failing GetProduct span has demo.product.id=OLJCESPC7Z and the event "Error: Product Catalog Fail Feature Flag Enabled"
+      logs:
+        - frontend / checkout errors for product OLJCESPC7Z
+    decisive_evidence: >-
+      All failing product-catalog spans share one attribute value, demo.product.id=OLJCESPC7Z;
+      GetProduct for other ids succeeds.
+    red_herrings:
+      - database outage (other products load fine; no blocking or errors in astronomy-db)
+      - a bad product row in the database (the failure is returned before the DB is queried)
+    grading:
+      must_identify:
+        - the failures are limited to one product id, OLJCESPC7Z
+        - product-catalog returns the error itself before reading the database
+      recommended_action: turn off productCatalogFailure; check the product-specific code path
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: ["Product Catalog Fail Feature Flag Enabled"]
+    verified: false
+
+  - flag: adFailure
+    variant: "on"
+    tier: extra
+    category: error_rate
+    culprit: ad
+    root_cause: ad fails about 1 in 10 GetAds requests with gRPC UNAVAILABLE.
+    mechanism: >-
+      When the flag is on, getAds throws StatusRuntimeException(UNAVAILABLE) when
+      random.nextInt(10) == 0, after building the response, and logs "GetAds Failed with status".
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/ad/src/main/java/oteldemo/AdService.java#L237-L240
+    alerts:
+      - {rule: HighErrorRate, service: ad}
+    symptoms:
+      metrics:
+        - ad error rate about 10%; request rate and latency unchanged
+      traces:
+        - failing ad GetAds spans with status ERROR and an "Error" event with UNAVAILABLE
+      logs:
+        - 'ad: "GetAds Failed with status Status{code=UNAVAILABLE ...}"'
+    decisive_evidence: A steady ~10% error rate in ad's own server spans, with ad healthy otherwise.
+    red_herrings:
+      - ad pods down or restarting (they are up; 90% of requests succeed)
+      - frontend failure (ad errors do not break the page)
+    grading:
+      must_identify:
+        - ad itself returns UNAVAILABLE for about 10% of GetAds calls
+        - user impact is limited (ads missing), the shop keeps working
+      recommended_action: turn off adFailure; low urgency
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: []
+    verified: false
+
+  - flag: cartFailure
+    variant: "100%"
+    tier: extra
+    category: error_rate
+    culprit: cart
+    root_cause: >-
+      cart's EmptyCart writes to a Valkey store at badhost:1234 that does not exist, so emptying the
+      cart after an order fails (the order itself still succeeds).
+    mechanism: >-
+      cart is built with a second ValkeyCartStore pointed at "badhost:1234". EmptyCart uses it with
+      probability n (the variant) and the call fails with a connection error. Only EmptyCart is
+      affected; GetCart and AddItem use the real store. checkout ignores EmptyCart's error.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/cart/src/services/CartService.cs#L74-L97
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/cart/src/Program.cs#L62
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/checkout/main.go#L381
+    alerts:
+      - {rule: HighErrorRate, service: cart, likely: true}
+    symptoms:
+      metrics:
+        - cart error rate equals the share of cart calls that are EmptyCart (one per order); may sit near the 5% threshold
+        - cart latency may rise if connecting to badhost waits for a connect timeout
+        - checkout error rate unchanged
+      traces:
+        - failing cart EmptyCart spans with a Valkey/Redis connection exception naming badhost:1234
+      logs:
+        - 'cart: Redis/Valkey connection errors for badhost:1234'
+    decisive_evidence: Only the EmptyCart operation fails, and its exception names badhost:1234 instead of valkey-cart.
+    red_herrings:
+      - valkey-cart is down (it is healthy; GetCart and AddItem work)
+      - orders are failing (they are not; checkout ignores the error)
+    grading:
+      must_identify:
+        - only EmptyCart fails, and it targets a wrong Valkey address (badhost:1234)
+        - orders still complete; the impact is carts not being emptied
+      recommended_action: fix cart's store configuration for EmptyCart (turn off cartFailure)
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: []
+    verified: false
+
+  - flag: adHighCpu
+    variant: "on"
+    tier: benchmark
+    category: saturation
+    culprit: ad
+    root_cause: >-
+      ad starts 4 busy-loop threads per pod, burning CPU continuously. Our values give ad no CPU
+      limit, so it competes for node CPU and slows its neighbours; the HPA scales ad out, and each
+      new replica starts 4 more threads once it serves a request.
+    mechanism: >-
+      Every GetAds call evaluates the flag and calls CPULoad.execute(true); the first call per pod
+      starts 4 daemon threads running logarithm loops until the flag is turned off (the next request
+      then stops them).
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/ad/src/main/java/oteldemo/AdService.java#L204-L205
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/ad/src/main/java/oteldemo/problempattern/CPULoad.java
+      - deploy/otel-demo/values.yaml (ad has a CPU request of 20m and no CPU limit) and deploy/otel-demo/hpa.yaml (ad scales 1-3 on CPU)
+    alerts:
+      - {rule: HighLatencyP95, service: ad, likely: true}
+    symptoms:
+      metrics:
+        - ad pod CPU usage jumps to several cores (k8s pod CPU metrics); ad replica count goes to 3
+        - latency rises on ad and possibly on other services sharing the node
+      traces:
+        - ad spans slower, with no error status
+      logs:
+        - 'ad: "High CPU-Load problempattern enabled" on each request'
+      k8s:
+        - HPA for ad scales to maxReplicas
+    decisive_evidence: >-
+      ad's CPU usage rises far above its 20m request with request rate unchanged, before other
+      services slow down.
+    red_herrings:
+      - a traffic increase (request rate is flat)
+      - the slowed neighbour services as culprits
+    grading:
+      must_identify:
+        - ad is consuming CPU without a matching rise in traffic
+        - other services slow down because of CPU contention on the node, not their own faults
+      recommended_action: turn off adHighCpu; give ad a CPU limit so one service cannot starve the node
+    tools: [query_metrics, k8s_state, search_logs]
+    giveaway_logs: ["High CPU-Load problempattern enabled"]
+    verified: false
+
+  - flag: adManualGc
+    variant: "on"
+    tier: extra
+    category: saturation
+    culprit: ad
+    root_cause: >-
+      ad forces repeated full garbage collections (10 System.gc() calls over a heap filled with
+      objects that have slow finalizers) at most every 10s, stalling requests.
+    mechanism: >-
+      When the flag is on, a GetAds request runs GarbageCollectionTrigger: it fills the heap to 90%
+      with objects whose finalize() sleeps 500ms and calls System.gc() 10 times, inside the request.
+      It runs again no sooner than 10s later.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/ad/src/main/java/oteldemo/AdService.java#L242-L246
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/ad/src/main/java/oteldemo/problempattern/GarbageCollectionTrigger.java
+    alerts:
+      - {rule: HighLatencyP95, service: ad, likely: true}
+    symptoms:
+      metrics:
+        - ad p95 latency spikes periodically; JVM GC time and heap usage spike (jvm_* metrics, scraped from ad:9465)
+      traces:
+        - some ad GetAds spans take seconds, others are normal
+      logs:
+        - 'ad: "Feature Flag adManualGc enabled, performing a manual gc now" and "The artificially triggered GCs took: N ms"'
+    decisive_evidence: ad latency spikes line up with GC duration spikes in ad's JVM metrics.
+    red_herrings:
+      - memory leak (heap returns to normal after each cycle)
+    grading:
+      must_identify:
+        - latency spikes in ad are caused by long garbage-collection pauses
+        - the GCs are explicitly triggered by the application, not by memory pressure from traffic
+      recommended_action: turn off adManualGc
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: ["adManualGc enabled"]
+    verified: false
+
+  - flag: emailMemoryLeak
+    variant: "100x"
+    tier: benchmark
+    category: memory
+    culprit: email
+    root_cause: >-
+      email keeps every sent message in memory (the test mailer's deliveries are never cleared) and
+      pads each body to N times its size, so memory grows with every order until the pod is
+      OOMKilled at its 128Mi limit and restarts.
+    mechanism: >-
+      With multiplier >= 1, send_email appends (N-1) x the body length of whitespace and skips
+      Mail::TestMailer.deliveries.clear, so every email stays referenced. checkout calls email with
+      a 1s timeout and only logs a warning when it fails.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/email/email_server.rb#L62-L85
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/checkout/main.go#L411-L414
+      - deploy/otel-demo/values.yaml (email memory limit 128Mi)
+    alerts: []
+    symptoms:
+      metrics:
+        - email pod memory working set climbs steadily with orders, then drops on restart (sawtooth)
+        - email container restart count increases
+      traces:
+        - email send_email spans slow down as memory grows; checkout's call to email times out while email restarts
+      logs:
+        - 'checkout: "failed to send order confirmation: ..." warnings'
+      k8s:
+        - email container last terminated with reason OOMKilled
+    decisive_evidence: email memory grows monotonically with order count and resets on each OOMKilled restart.
+    red_herrings:
+      - checkout fault (orders succeed; checkout only warns)
+      - traffic spike (order rate is normal)
+    grading:
+      must_identify:
+        - email has a memory leak that grows per email sent
+        - the pod is OOMKilled at its memory limit and restarts
+        - customer impact is missing confirmation emails, orders still succeed
+      recommended_action: turn off emailMemoryLeak; restarting email only buys time
+    tools: [query_metrics, k8s_state, search_logs]
+    giveaway_logs: []
+    verified: false
+    gap: No current rule pages for this; needs an alert on memory growth or container restarts.
+
+  - flag: recommendationCacheFailure
+    variant: "on"
+    tier: benchmark
+    category: memory
+    culprit: recommendation
+    root_cause: >-
+      recommendation's product-id cache grows without bound: on each cache miss (50% of calls) it
+      appends the whole product list plus a quarter of the existing cache, so the cache grows
+      geometrically, slowing every request and eventually exhausting the pod's memory.
+    mechanism: >-
+      With the flag on, get_product_list calls ListProducts on a miss and does
+      cached_ids = cached_ids + response_ids; cached_ids = cached_ids + cached_ids[:len//4]. Each
+      request then builds set(cached_ids), so CPU time and memory per request grow with the cache.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/recommendation/recommendation_server.py#L77-L95
+      - deploy/otel-demo/values.yaml (recommendation memory limit 500Mi)
+    alerts:
+      - {rule: HighLatencyP95, service: recommendation, likely: true}
+    symptoms:
+      metrics:
+        - recommendation latency and memory climb steadily from the moment the flag is on; restarts when OOMKilled
+      traces:
+        - get_product_list spans carry demo.feature_flag.recommendation_cache=true, demo.recommendation.cache_hit, and a demo.product.count that keeps growing
+      logs:
+        - 'recommendation: alternating "get_product_list: cache miss" / "cache hit"'
+      k8s:
+        - recommendation container OOMKilled and restarted once memory reaches 500Mi
+    decisive_evidence: demo.product.count on get_product_list spans grows far beyond the 10 real products.
+    red_herrings:
+      - product-catalog slowness (ListProducts is fast)
+      - a traffic increase
+    grading:
+      must_identify:
+        - the recommendation cache grows without bound (a leak), not a cache outage
+        - growing cache size explains both the rising latency and the memory growth
+      recommended_action: turn off recommendationCacheFailure and restart recommendation to drop the cache
+    tools: [query_metrics, get_traces, k8s_state, search_logs]
+    giveaway_logs: []
+    verified: false
+
+  - flag: kafkaQueueProblems
+    variant: "on"
+    tier: benchmark
+    category: queue
+    culprit: fraud-detection (slow consumer) with checkout over-producing
+    root_cause: >-
+      checkout publishes 100 extra copies of every order to the orders topic while fraud-detection
+      sleeps 1s per message, so fraud-detection's consumer lag grows without bound.
+    mechanism: >-
+      After a successful order, checkout's sendToPostProcessor sends the flag value (100) more copies
+      of the order message. fraud-detection sleeps 1s for each record it consumes while the flag is
+      on. accounting consumes the same topic without the delay.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/checkout/main.go#L716-L727
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/fraud-detection/src/main/kotlin/frauddetection/main.kt#L62-L72
+    alerts: []
+    symptoms:
+      metrics:
+        - consumer group lag for fraud-detection on topic orders climbs steadily (kafka consumer group lag from the kafkametrics receiver); accounting lag rises less or recovers
+        - orders topic message rate jumps about 100x relative to the order rate
+      traces:
+        - checkout produces bursts of "orders publish" producer spans per order
+        - fraud-detection consumer spans each take about 1s
+      logs:
+        - 'checkout: "Warning: FeatureFlag ''kafkaQueueProblems'' is activated, overloading queue now."'
+        - 'fraud-detection: "FeatureFlag ''kafkaQueueProblems'' is enabled, sleeping 1 second"'
+    decisive_evidence: >-
+      Lag grows only for fraud-detection, whose per-message processing time is ~1s, while the
+      topic's inbound rate is ~100x the order rate.
+    red_herrings:
+      - kafka broker failure (the broker is healthy, accounting keeps up)
+      - checkout errors (there are none)
+    grading:
+      must_identify:
+        - fraud-detection consumer lag on the orders topic is growing
+        - two causes together: message volume ~100x orders from checkout, and ~1s processing per message in fraud-detection
+      recommended_action: turn off kafkaQueueProblems; scale fraud-detection consumers only after fixing the 1s delay
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: ["kafkaQueueProblems"]
+    verified: false
+    gap: >-
+      No current rule pages for this: consumer spans are CONSUMER kind, not SERVER, and there is no
+      lag rule. Needs an alert on consumer group lag.
+
+  - flag: intlShippingSlowdown
+    variant: "10sec"
+    tier: benchmark
+    category: latency
+    culprit: shipping
+    root_cause: >-
+      shipping delays ShipOrder by 10s for every address outside the US, so international orders
+      take 10s longer while US orders are unaffected.
+    mechanism: >-
+      ship_order checks whether the destination country is outside the US; if so it reads the flag
+      and sleeps that many seconds before creating a tracking id. Of the load generator's 9 test
+      customers, 1 (Canada) is international, so about 1 in 9 orders is slowed. GetQuote is not
+      affected.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/shipping/src/shipping_service.rs#L55-L93
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/load-generator/people.json
+    alerts:
+      - {rule: HighLatencyP95, service: checkout, likely: true}
+      - {rule: HighLatencyP95, service: shipping, likely: false}
+    symptoms:
+      metrics:
+        - checkout p95 jumps to ~10s while its median is unchanged; shipping p95 may stay under 1s because ShipOrder is a small share of shipping calls next to GetQuote
+      traces:
+        - slow checkout PlaceOrder traces all have a ~10s shipping ShipOrder child, and all ship to a non-US (Canadian) address
+      logs:
+        - 'shipping: "Delaying international shipment due to intlShippingSlowdown feature flag" with delay_secs=10'
+    decisive_evidence: Only orders with a non-US shipping address are slow, and the time is spent inside shipping ShipOrder.
+    red_herrings:
+      - checkout as the culprit (it is waiting on shipping)
+      - payment or database slowness
+    grading:
+      must_identify:
+        - shipping ShipOrder adds ~10s
+        - only international (non-US) orders are affected
+      recommended_action: turn off intlShippingSlowdown
+    tools: [query_metrics, get_traces, search_logs]
+    giveaway_logs: ["intlShippingSlowdown"]
+    verified: false
+
+  - flag: imageSlowLoad
+    variant: "10sec"
+    tier: extra
+    category: latency
+    culprit: frontend (browser) asking frontend-proxy to delay image requests
+    root_cause: >-
+      The frontend's product cards add an x-envoy-fault-delay-request header to image requests, and
+      the frontend-proxy (Envoy) fault filter honours it, delaying every product image by 10s.
+    mechanism: >-
+      ProductCard.tsx reads the flag in the browser and sets x-envoy-fault-delay-request to its value
+      in milliseconds on the image fetch; Envoy's HTTP fault filter (header_delay, 100%) delays the
+      request by that amount. Only real browsers are affected: with our load generator that is at most
+      one Playwright user, so the signal is weak.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/frontend/components/ProductCard/ProductCard.tsx#L32-L45
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/frontend-proxy/envoy.tmpl.yaml#L98-L105
+    alerts:
+      - {rule: HighLatencyP95, service: frontend-proxy, likely: false}
+    symptoms:
+      metrics:
+        - frontend-proxy latency rises for /images/ routes only; backend services unchanged
+      traces:
+        - frontend-proxy spans for /images/* take ~10s; image-provider spans under them are fast
+      logs: []
+    decisive_evidence: The delay is added in frontend-proxy before image-provider is reached, and only for requests carrying the fault header.
+    red_herrings:
+      - image-provider slowness (its own spans are fast)
+    grading:
+      must_identify:
+        - image requests are delayed at the proxy (Envoy fault injection), image-provider is healthy
+      recommended_action: turn off imageSlowLoad
+    tools: [query_metrics, get_traces]
+    giveaway_logs: []
+    verified: false
+
+  - flag: loadGeneratorFloodHomepage
+    variant: "on"
+    tier: benchmark
+    category: traffic
+    culprit: load-generator (traffic surge; no service is faulty)
+    root_cause: >-
+      The load generator floods the homepage: each run of its flood task sends 100 extra GET / in a
+      row, multiplying frontend traffic. Services are healthy but overloaded.
+    mechanism: >-
+      locustfile's flood_home task (weight 5) reads the flag and, if > 0, requests "/" that many times
+      inside a user_flood_home span with demo.request.flood.count=100.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/load-generator/locustfile.py#L224-L232
+    alerts:
+      - {rule: HighLatencyP95, service: frontend, likely: true}
+    symptoms:
+      metrics:
+        - frontend and frontend-proxy request rate jumps by an order of magnitude; downstream calls from the homepage (product-catalog ListProducts, ad, currency) rise with it
+        - CPU on frontend climbs; HPAs scale frontend / frontend-proxy out
+      traces:
+        - load-generator user_flood_home spans with demo.request.flood.count=100, each with 100 child GET / requests
+      logs:
+        - 'load-generator: "User flooding homepage 100 times"'
+    decisive_evidence: Request rate rises before latency does, and the extra requests all come from load-generator's user_flood_home spans.
+    red_herrings:
+      - a code fault in frontend
+      - product-catalog database slowness (no blocking, queries fast)
+    grading:
+      must_identify:
+        - the cause is a surge in incoming traffic from the load generator, not a fault in any service
+      recommended_action: stop the flood (turn off loadGeneratorFloodHomepage); rate-limit if it were real traffic
+    tools: [query_metrics, get_traces, k8s_state]
+    giveaway_logs: ["User flooding homepage"]
+    verified: false
+
+  - flag: failedReadinessProbe
+    variant: "on"
+    tier: not_observable
+    category: availability
+    culprit: cart
+    root_cause: cart's gRPC health check reports Unhealthy ("connection failed") while the flag is on.
+    mechanism: >-
+      The readiness health check returns Unhealthy. Chart 0.42.3 defines no readinessProbe for cart,
+      so Kubernetes never calls it and nothing changes in our deployment.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/cart/src/services/HealthCheckService.cs#L28-L42
+    alerts: []
+    symptoms: {}
+    note: To use it, add a gRPC readinessProbe for cart in deploy/otel-demo/values.yaml; cart pods then drop out of the Service endpoints.
+    verified: false
+
+  - flag: emitRawPii
+    variant: "on"
+    tier: not_a_fault
+    category: privacy
+    culprit: null
+    root_cause: >-
+      Not a failure. checkout and payment add user.email, demo.payment.card_number and
+      demo.payment.card_cvv to spans. The collector always redacts them (CVV dropped, email hashed,
+      card number masked to the last 4 digits).
+    mechanism: Use it to test AOCE-39 (PII redaction before LLM calls) with PII present upstream of the collector.
+    source:
+      - https://github.com/open-telemetry/opentelemetry-demo/blob/3.1.0/src/payment/charge.js#L41
+    alerts: []
+    symptoms: {}
+    verified: false
+
+  - flag: aiRunawayAgent
+    variant: "on"
+    tier: out_of_scope
+    category: ai_agent
+    culprit: null
+    root_cause: The demo's own AI agent loops on tool calls. We disable that agent in values.yaml, so the flag has no effect.
+    alerts: []
+    symptoms: {}
+    verified: false
+
+  - flag: aiSlowResponse
+    variant: "10sec"
+    tier: out_of_scope
+    category: ai_agent
+    culprit: null
+    root_cause: Slows the demo's own AI agent's LLM responses. We disable that agent in values.yaml, so the flag has no effect.
+    alerts: []
+    symptoms: {}
+    verified: false

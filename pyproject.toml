@@ -19,7 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=9", "pytest-asyncio>=1.4"]
+dev = ["pytest>=9", "pytest-asyncio>=1.4", "pyyaml>=6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/aoce"]
