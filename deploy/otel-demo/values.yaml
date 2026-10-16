@@ -92,11 +92,13 @@ prometheus:
   configmapReload:
     prometheus:
       enabled: true
+      resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 48Mi}}
   alertmanager:
     enabled: true
     fullnameOverride: alertmanager
     configmapReload:
       enabled: true
+      resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 48Mi}}
     persistence: {enabled: false}
     resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
     config:
