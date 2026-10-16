@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     max_concurrent_investigations: int = 2
     # Incidents kept in memory (AOCE-62); the oldest finished ones are dropped first.
     max_incidents: int = 200
-    # Investigations allowed to wait for a slot; alerts beyond this are dropped, not queued (AOCE-59).
+    # Investigations allowed to wait for a slot; new alerts beyond this are dropped, not stored (AOCE-59).
     max_queued_investigations: int = 20
 
     # Observability backends (defaults are in-cluster service names in namespace otel-demo)

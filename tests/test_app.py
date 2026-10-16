@@ -116,12 +116,11 @@ def test_alerts_beyond_the_queue_bound_are_dropped_and_retried_later(monkeypatch
         payload = webhook("firing", "firing", "firing")
         for n, alert in enumerate(payload["alerts"]):
             alert["fingerprint"] = f"q{n}"
-        c.post("/alerts", json=payload)
-        statuses = [i["status"] for i in c.get("/incidents").json()]
-        assert statuses[2] == "dropped" and all(s in ("queued", "investigating") for s in statuses[:2])
+        assert len(c.post("/alerts", json=payload).json()["incidents"]) == 2
+        assert len(c.get("/incidents").json()) == 2  # the third was dropped, not stored
         dropped = webhook("firing")
         dropped["alerts"][0]["fingerprint"] = "q2"
-        assert len(c.post("/alerts", json=dropped).json()["incidents"]) == 1  # a re-send retries it
+        assert c.post("/alerts", json=dropped).json()["incidents"] == []  # still full
     get_settings.cache_clear()
 
 

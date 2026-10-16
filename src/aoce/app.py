@@ -7,7 +7,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel
@@ -24,13 +24,15 @@ log = logging.getLogger("aoce")
 tools = build_registry(get_settings())
 
 
+IncidentStatus = Literal["queued", "investigating", "concluded", "inconclusive", "failed", "skipped"]
+
+
 class Incident(BaseModel):
     id: str
     received_at: datetime
     alert: Alert
-    # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set,
-    # dropped when the queue is full.
-    status: str = "queued"
+    # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set.
+    status: IncidentStatus = "queued"
     investigation: InvestigationResult | None = None
 
 
@@ -83,6 +85,9 @@ class IncidentStore:
     def clear(self) -> None:
         self._incidents.clear()
         self._by_alert.clear()
+
+    def active_count(self) -> int:
+        return sum(i.status in self.ACTIVE for i in self._incidents.values())
 
     def __len__(self) -> int:
         return len(self._incidents)
@@ -163,11 +168,11 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
 def open_incident_for(alert: Alert) -> Incident | None:
     """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
 
-    A re-send of an alert whose investigation failed or was dropped opens a fresh incident, so a
-    transient API error or a full queue gets a retry on Alertmanager's next repeat.
+    A re-send of an alert whose investigation failed opens a fresh incident, so a transient API
+    or network error gets a retry on Alertmanager's next repeat.
     """
     existing = INCIDENTS.find(alert)
-    if existing is not None and existing.status not in ("failed", "dropped"):
+    if existing is not None and existing.status != "failed":
         return None
     return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
 
@@ -188,18 +193,19 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
         incident = open_incident_for(alert)
         if incident is None:
             continue
-        INCIDENTS.add(incident, get_settings().max_incidents)
+        settings = get_settings()
+        if investigator is not None and INCIDENTS.active_count() >= (
+            settings.max_concurrent_investigations + settings.max_queued_investigations
+        ):
+            # Not stored, so it cannot push finished incidents out; Alertmanager's next re-send retries it.
+            log.warning("investigation queue is full; dropping %s (%s)", alert.labels.get("alertname"), alert.service)
+            continue
+        INCIDENTS.add(incident, settings.max_incidents)
         opened.append(incident.id)
         log.info("incident %s opened for %s (%s)", incident.id, alert.labels.get("alertname"), alert.service)
         if investigator is None:
             incident.status = "skipped"
             log.warning("ANTHROPIC_API_KEY is not set; incident %s will not be investigated", incident.id)
-            continue
-        settings = get_settings()
-        active = sum(i.status in IncidentStore.ACTIVE for i in INCIDENTS.values())
-        if active > settings.max_concurrent_investigations + settings.max_queued_investigations:
-            incident.status = "dropped"
-            log.warning("investigation queue is full; incident %s will not be investigated", incident.id)
             continue
         task = asyncio.create_task(run_investigation(incident, investigator))
         _tasks.add(task)
