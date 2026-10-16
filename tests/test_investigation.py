@@ -144,19 +144,35 @@ async def test_ignoring_the_wrap_up_ends_inconclusive():
     result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "token_budget"
     assert len(result.trace) == 1  # the tool call after the wrap-up was not run
+    report = result.report
+    assert report["fallback"] and report["root_cause"] is None and report["confidence"] == "low"
+    assert report["hypotheses"] == [
+        {"statement": "h", "status": "inconclusive", "evidence": ['echo {"x": "a"}']}
+    ]
+    assert report["checked"] == ["echo"] and report["not_checked"] == []
+    assert "token budget limit" in report["summary"] and "not what they returned" in report["summary"]
+    assert "model_text" not in report
+
+
+async def test_a_plain_text_answer_to_the_wrap_up_is_kept():
+    llm = FakeLLM(response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500), response(text("It's the DB.")))
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    assert result.report["fallback"] and result.report["model_text"] == "It's the DB."
 
 
 async def test_ending_without_a_report_is_nudged_once():
     llm = FakeLLM(response(text("I think it is the DB.")), response(text("Still the DB.")))
     result = await Investigator(llm, registry(), settings()).investigate(ALERT)
     assert FINISH in llm.calls[1][-1]["content"]
-    assert result.stop_reason == "no_report" and result.report == {"summary": "Still the DB."}
+    assert result.stop_reason == "no_report" and result.report["fallback"]
+    assert result.report["model_text"] == "Still the DB." and "even after a reminder" in result.report["summary"]
 
 
 async def test_hard_timeout():
     llm = FakeLLM(response(text("x")), delay=1)
     result = await Investigator(llm, registry(), settings(investigation_timeout_s=0.05)).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "timeout"
+    assert result.report["fallback"] and "hard time limit" in result.report["summary"]
 
 
 async def test_refusal_fails_the_investigation():
@@ -193,3 +209,20 @@ async def test_registry_that_raises_does_not_fail_the_investigation():
     assert result.status == "concluded"
     assert result.trace[0].is_error
     assert "ValueError: bad JSON from Prometheus" in result.trace[0].result_preview
+
+
+@pytest.mark.parametrize(("status", "retryable"), [(529, True), (500, True), (429, True), (401, False), (400, False)])
+async def test_only_transient_api_errors_are_retryable(status, retryable):
+    import anthropic
+    import httpx
+
+    error = anthropic.APIStatusError(
+        "boom", response=httpx.Response(status, request=httpx.Request("POST", "https://api")), body=None
+    )
+
+    class FailingLLM:
+        async def create(self, messages, *, system=None, tools=None):
+            raise error
+
+    result = await Investigator(FailingLLM(), registry(), settings()).investigate(ALERT)
+    assert result.status == "failed" and result.retryable is retryable

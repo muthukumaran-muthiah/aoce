@@ -128,6 +128,14 @@ class InvestigationResult(BaseModel):
     tokens_used: int = 0
     trace: list[ToolCall] = []
     error: str | None = None
+    # A failure worth retrying on Alertmanager's next re-send: overload, rate limit, network or 5xx.
+    retryable: bool = False
+
+
+def _transient(e: Exception) -> bool:
+    if isinstance(e, anthropic.APIConnectionError):
+        return True
+    return isinstance(e, anthropic.APIStatusError) and (e.status_code == 429 or e.status_code >= 500)
 
 
 def tool_definitions(tools: ToolRegistry) -> list[dict[str, Any]]:
@@ -156,6 +164,50 @@ def alert_prompt(alert: Alert) -> str:
     )
 
 
+_LIMIT_LABELS = {
+    "max_steps": "step",
+    "token_budget": "token budget",
+    "soft_timeout": "time",
+    "timeout": "hard time",
+}
+_FALLBACK_LINE_CHARS = 300
+
+
+def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
+    """A low-confidence report built from the trace, for when the model never called finish_investigation.
+
+    Same shape as the finish_investigation input, plus `"fallback": True` and, when Claude answered
+    in plain text instead, `model_text`; readers of `report` need no special case.
+    """
+    hypotheses: dict[str, list[str]] = {}
+    for call in state.trace:
+        line = f"{call.tool} {json.dumps(call.input, default=str)}"[:_FALLBACK_LINE_CHARS]
+        line += " (error)" if call.is_error else ""
+        hypotheses.setdefault(call.hypothesis or "(no hypothesis given)", []).append(line)
+    called = {call.tool for call in state.trace}
+    if reason == "no_report":
+        opening = "Claude stopped without reporting, even after a reminder. "
+    else:
+        opening = f"The investigation reached its {_LIMIT_LABELS.get(reason, 'run')} limit before Claude reported. "
+    summary = opening + (
+        f"Each hypothesis's evidence lists the {len(state.trace)} tool call(s) that completed (calls "
+        "still running at a hard timeout are not included), not what they returned; no root cause "
+        "was established."
+    )
+    return {
+        "summary": summary,
+        "root_cause": None,
+        "confidence": "low",
+        "hypotheses": [
+            {"statement": h, "status": "inconclusive", "evidence": evidence} for h, evidence in hypotheses.items()
+        ],
+        "recommended_action": None,
+        "checked": sorted(called),
+        "not_checked": [name for name in tools.names() if name not in called],
+        "fallback": True,
+    }
+
+
 def _tokens(usage: Any) -> int:
     return sum(
         getattr(usage, field, 0) or 0
@@ -179,8 +231,11 @@ class Investigator:
                 await self._loop(alert, state)
         except TimeoutError:
             state.status, state.stop_reason = "inconclusive", "timeout"
+            if state.report is None:
+                state.report = fallback_report(state, self.tools, "timeout")
         except (LLMRefusalError, anthropic.APIError) as e:
             state.status, state.stop_reason, state.error = "failed", "error", str(e)
+            state.retryable = _transient(e)
             log.warning("investigation failed: %s", e)
         return state
 
@@ -208,14 +263,19 @@ class Investigator:
                 return
 
             if wrap_up is not None:
-                # Told to report on the previous turn and did not.
+                # Told to report on the previous turn and did not: report from the trace instead (AOCE-64).
                 state.stop_reason = wrap_up
+                state.report = fallback_report(state, self.tools, wrap_up)
+                if answer := LLMClient.text(response):
+                    state.report["model_text"] = answer  # what Claude wrote instead of reporting
                 return
 
             if not calls:
                 if nudged:
                     state.stop_reason = "no_report"
-                    state.report = {"summary": LLMClient.text(response) or None}
+                    state.report = fallback_report(state, self.tools, "no_report")
+                    if answer := LLMClient.text(response):
+                        state.report["model_text"] = answer
                     return
                 nudged = True
                 messages.append({"role": "user", "content": f"Report your findings by calling {FINISH}."})

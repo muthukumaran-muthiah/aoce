@@ -26,6 +26,12 @@ class Settings(BaseSettings):
     investigation_timeout_s: float = 300
     investigation_token_budget: int = 300_000
     tool_timeout_s: float = 30
+    # How many investigations run at once (AOCE-59); the rest wait as "queued".
+    max_concurrent_investigations: int = Field(2, ge=1)
+    # Incidents kept in memory (AOCE-62); the oldest finished ones are dropped first.
+    max_incidents: int = Field(200, ge=1)
+    # Investigations allowed to wait for a slot; new alerts beyond this are dropped, not stored (AOCE-59).
+    max_queued_investigations: int = Field(20, ge=0)
 
     # Observability backends (defaults are in-cluster service names in namespace otel-demo)
     prometheus_url: str = "http://prometheus.otel-demo:9090"
