@@ -73,6 +73,13 @@ async def test_series_are_capped_and_downsampled():
     assert len(out["results"][0]["series"]) <= 20
 
 
+@pytest.mark.parametrize("window, step", [(5, 15), (60, 60), (180, 120)])
+async def test_step_never_exceeds_the_rate_window(window, step):
+    registry, seen = registry_with(lambda r: httpx.Response(200, json=matrix({})))
+    await registry.run("query_metrics", args(window_minutes=window))
+    assert float(seen[0].url.params["step"]) == step
+
+
 def test_error_rate_query_keeps_services_without_errors():
     q = build_promql("error_rate", "cart")
     assert 'service_name="cart"' in q
