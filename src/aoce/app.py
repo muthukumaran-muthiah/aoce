@@ -9,10 +9,11 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, status
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
+from aoce.auth import require_api_key, require_webhook_token
 from aoce.config import get_settings
 from aoce.investigation import InvestigationResult, Investigator
 from aoce.llm import LLMClient
@@ -164,7 +165,7 @@ async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/alerts", status_code=status.HTTP_202_ACCEPTED)
+@app.post("/alerts", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_webhook_token)])
 async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
     """Accept an Alertmanager webhook and open one incident per firing alert."""
     opened = []
@@ -188,12 +189,12 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
     return {"incidents": opened}
 
 
-@app.get("/incidents")
+@app.get("/incidents", dependencies=[Depends(require_api_key)])
 async def list_incidents() -> list[Incident]:
     return INCIDENTS.values()
 
 
-@app.get("/incidents/{incident_id}")
+@app.get("/incidents/{incident_id}", dependencies=[Depends(require_api_key)])
 async def get_incident(incident_id: str) -> Incident:
     incident = INCIDENTS.get(incident_id)
     if incident is None:
@@ -201,13 +202,13 @@ async def get_incident(incident_id: str) -> Incident:
     return incident
 
 
-@app.get("/tools")
+@app.get("/tools", dependencies=[Depends(require_api_key)])
 async def list_tools() -> list[dict[str, Any]]:
     """Tool definitions exactly as the agent sees them."""
     return tools.definitions()
 
 
-@app.post("/tools/{name}")
+@app.post("/tools/{name}", dependencies=[Depends(require_api_key)])
 async def run_tool(name: str, tool_input: dict[str, Any]) -> Any:
     """Run one read-only tool by hand, e.g. to check it against the live demo before the agent uses it."""
     if name not in tools.names():
