@@ -156,6 +156,9 @@ def alert_prompt(alert: Alert) -> str:
     )
 
 
+_LIMIT_LABELS = {"max_steps": "step", "token_budget": "token budget", "soft_timeout": "time"}
+
+
 def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
     """A low-confidence report built from the trace, for when the model never called finish_investigation.
 
@@ -168,8 +171,9 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     called = {call.tool for call in state.trace}
     return {
         "summary": (
-            f"The investigation stopped at its {reason} limit before Claude reported. This report lists "
-            f"the {len(state.trace)} tool call(s) it made; no root cause was established."
+            f"The investigation reached its {_LIMIT_LABELS.get(reason, reason)} limit before Claude reported. "
+            f"Each hypothesis's evidence lists the {len(state.trace)} tool call(s) it made, not what they "
+            "returned; no root cause was established."
         ),
         "root_cause": None,
         "confidence": "low",

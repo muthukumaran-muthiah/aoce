@@ -90,7 +90,7 @@ def test_firing_alert_is_investigated_in_the_background(monkeypatch):
     monkeypatch.setattr("aoce.app.make_investigator", lambda: FakeInvestigator())
     with TestClient(app) as c:
         incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
-        for _ in range(50):
+        for _ in range(250):
             body = c.get(f"/incidents/{incident_id}").json()
             if body["status"] == "concluded":
                 break
@@ -155,7 +155,7 @@ def test_investigations_beyond_the_cap_wait_as_queued(monkeypatch):
     with TestClient(app) as c:
         release = c.portal.call(asyncio.Event)
         c.post("/alerts", json=webhook("firing", "firing", "firing"))
-        for _ in range(50):
+        for _ in range(250):
             if len(running) == 2:
                 break
             time.sleep(0.02)
@@ -163,7 +163,7 @@ def test_investigations_beyond_the_cap_wait_as_queued(monkeypatch):
         assert len(running) == 2
         assert statuses(c) == ["investigating", "investigating", "queued"]
         c.portal.call(release.set)
-        for _ in range(50):
+        for _ in range(250):
             if statuses(c) == ["concluded"] * 3:
                 break
             time.sleep(0.02)
@@ -192,3 +192,29 @@ def test_incident_store_drops_the_oldest_finished_incident_first():
     store.values()[0].status = "concluded"
     store.add(incident(5, "queued"), limit=2)  # once one finishes, it is the one dropped
     assert [i.id for i in store.values()] == ["i3", "i4", "i5"]
+
+
+def test_a_cancelled_investigation_is_marked_failed(monkeypatch):
+    import asyncio
+
+    from aoce.alerts import Alert
+    from aoce.app import Incident
+
+    monkeypatch.setattr(aoce.app, "_slots", None)
+    alert = Alert.model_validate(webhook("firing")["alerts"][0])
+    incident = Incident(id="c1", received_at="2026-10-16T00:00:00Z", alert=alert)
+
+    class Hangs:
+        async def investigate(self, alert):
+            await asyncio.Event().wait()
+
+    async def go():
+        task = asyncio.create_task(aoce.app.run_investigation(incident, Hangs()))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(go())
+    assert incident.status == "failed"

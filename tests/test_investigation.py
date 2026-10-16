@@ -150,7 +150,7 @@ async def test_ignoring_the_wrap_up_ends_inconclusive():
         {"statement": "h", "status": "inconclusive", "evidence": ['echo {"x": "a"}']}
     ]
     assert report["checked"] == ["echo"] and report["not_checked"] == []
-    assert "token_budget" in report["summary"]
+    assert "token budget limit" in report["summary"] and "not what they returned" in report["summary"]
 
 
 async def test_ending_without_a_report_is_nudged_once():

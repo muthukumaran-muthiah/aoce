@@ -136,15 +136,19 @@ app = FastAPI(title="AI On-Call Engineer", version="0.1.0", lifespan=lifespan)
 
 
 async def run_investigation(incident: Incident, investigator: Investigator) -> None:
-    # Stays "queued" until a slot frees up.
-    async with investigation_slots():
-        incident.status = "investigating"
-        try:
+    try:
+        # Stays "queued" until a slot frees up.
+        async with investigation_slots():
+            incident.status = "investigating"
             incident.investigation = await investigator.investigate(incident.alert)
             incident.status = incident.investigation.status
-        except Exception:
-            log.exception("investigation of incident %s crashed", incident.id)
-            incident.status = "failed"
+    except asyncio.CancelledError:
+        # Shutdown: leave a final status rather than "queued" or "investigating" forever.
+        incident.status = "failed"
+        raise
+    except Exception:
+        log.exception("investigation of incident %s crashed", incident.id)
+        incident.status = "failed"
     log.info("incident %s %s", incident.id, incident.status)
 
 
