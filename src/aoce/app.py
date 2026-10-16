@@ -28,7 +28,8 @@ class Incident(BaseModel):
     id: str
     received_at: datetime
     alert: Alert
-    # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set.
+    # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set,
+    # dropped when the queue is full.
     status: str = "queued"
     investigation: InvestigationResult | None = None
 
@@ -129,6 +130,8 @@ async def close_investigator() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    global _slots
+    _slots = None  # bind a fresh semaphore, sized from current settings, to this event loop
     yield
     # Stop investigations before closing the client they use, so each ends as cancelled, not as an API error.
     for task in list(_tasks):
@@ -160,11 +163,11 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
 def open_incident_for(alert: Alert) -> Incident | None:
     """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
 
-    A re-send of an alert whose investigation failed opens a fresh incident, so a transient
-    API or network error gets a retry on Alertmanager's next repeat.
+    A re-send of an alert whose investigation failed or was dropped opens a fresh incident, so a
+    transient API error or a full queue gets a retry on Alertmanager's next repeat.
     """
     existing = INCIDENTS.find(alert)
-    if existing is not None and existing.status != "failed":
+    if existing is not None and existing.status not in ("failed", "dropped"):
         return None
     return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
 
@@ -191,6 +194,12 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
         if investigator is None:
             incident.status = "skipped"
             log.warning("ANTHROPIC_API_KEY is not set; incident %s will not be investigated", incident.id)
+            continue
+        settings = get_settings()
+        active = sum(i.status in IncidentStore.ACTIVE for i in INCIDENTS.values())
+        if active > settings.max_concurrent_investigations + settings.max_queued_investigations:
+            incident.status = "dropped"
+            log.warning("investigation queue is full; incident %s will not be investigated", incident.id)
             continue
         task = asyncio.create_task(run_investigation(incident, investigator))
         _tasks.add(task)

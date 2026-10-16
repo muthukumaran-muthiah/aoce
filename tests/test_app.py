@@ -98,6 +98,33 @@ def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
     assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
 
 
+def test_alerts_beyond_the_queue_bound_are_dropped_and_retried_later(monkeypatch):
+    import asyncio
+
+    class Hangs:
+        async def investigate(self, alert):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: Hangs())
+    monkeypatch.setenv("AOCE_MAX_CONCURRENT_INVESTIGATIONS", "1")
+    monkeypatch.setenv("AOCE_MAX_QUEUED_INVESTIGATIONS", "1")
+    get_settings.cache_clear()
+    with TestClient(app, headers=AUTH) as c:
+        payload = webhook("firing", "firing", "firing")
+        for n, alert in enumerate(payload["alerts"]):
+            alert["fingerprint"] = f"q{n}"
+        c.post("/alerts", json=payload)
+        statuses = [i["status"] for i in c.get("/incidents").json()]
+        assert statuses[2] == "dropped" and all(s in ("queued", "investigating") for s in statuses[:2])
+        dropped = webhook("firing")
+        dropped["alerts"][0]["fingerprint"] = "q2"
+        assert len(c.post("/alerts", json=dropped).json()["incidents"]) == 1  # a re-send retries it
+    get_settings.cache_clear()
+
+
 def test_shutdown_cancels_running_investigations_before_closing_the_client(monkeypatch):
     import asyncio
 

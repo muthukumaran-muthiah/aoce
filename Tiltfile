@@ -115,6 +115,7 @@ AGENT_SETTINGS = {
     'AOCE_TOOL_TIMEOUT_S': '30',
     'AOCE_MAX_CONCURRENT_INVESTIGATIONS': '2',  # the rest wait as "queued" (AOCE-59)
     'AOCE_MAX_INCIDENTS': '200',                # kept in memory; oldest finished dropped first (AOCE-62)
+    'AOCE_MAX_QUEUED_INVESTIGATIONS': '20',     # alerts beyond this are dropped (AOCE-59)
     # Backends the tools query
     'AOCE_PROMETHEUS_URL': 'http://prometheus.otel-demo:9090',
     'AOCE_PROMETHEUS_PUBLIC_URL': 'http://localhost:9090',

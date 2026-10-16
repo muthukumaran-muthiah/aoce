@@ -157,21 +157,24 @@ def alert_prompt(alert: Alert) -> str:
 
 
 _LIMIT_LABELS = {"max_steps": "step", "token_budget": "token budget", "soft_timeout": "time", "timeout": "hard time"}
+_FALLBACK_LINE_CHARS = 300
 
 
 def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
     """A low-confidence report built from the trace, for when the model never called finish_investigation.
 
-    Same shape as the finish_investigation input, so readers of `report` need no special case.
+    Same shape as the finish_investigation input, plus `"fallback": True`, so readers of `report`
+    need no special case.
     """
     hypotheses: dict[str, list[str]] = {}
     for call in state.trace:
-        line = f"{call.tool} {json.dumps(call.input, default=str)}" + (" (error)" if call.is_error else "")
+        line = f"{call.tool} {json.dumps(call.input, default=str)}"[:_FALLBACK_LINE_CHARS]
+        line += " (error)" if call.is_error else ""
         hypotheses.setdefault(call.hypothesis or "(no hypothesis given)", []).append(line)
     called = {call.tool for call in state.trace}
     return {
         "summary": (
-            f"The investigation reached its {_LIMIT_LABELS.get(reason, reason)} limit before Claude reported. "
+            f"The investigation reached its {_LIMIT_LABELS.get(reason, "run")} limit before Claude reported. "
             f"Each hypothesis's evidence lists the {len(state.trace)} tool call(s) it made, not what they "
             "returned; no root cause was established."
         ),
