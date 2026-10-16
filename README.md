@@ -74,7 +74,7 @@ Expected symptoms come from reading the demo's source; each entry is `verified: 
 src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
 src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
 src/aoce/alerts.py   Alertmanager webhook v4 models
-src/aoce/llm.py      Claude client (claude-opus-5-5, effort high, server-side refusal fallback)
+src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
 src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres)
 ```

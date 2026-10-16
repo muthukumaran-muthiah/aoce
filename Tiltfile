@@ -91,7 +91,7 @@ k8s_yaml(secret_from_dict('aoce-anthropic', namespace=AOCE_NS,
 # Agent settings, passed to the pod as environment variables (see src/aoce/config.py).
 # Edit a value here and Tilt redeploys the agent. URLs are in-cluster service names.
 AGENT_SETTINGS = {
-    'AOCE_MODEL': 'claude-opus-5-5',
+    'AOCE_MODEL': 'claude-haiku-5-5',       # cheapest; claude-sonnet-5-5 or claude-opus-5-5 for harder cases
     'AOCE_EFFORT': 'high',                     # low | medium | high | xhigh | max
     'AOCE_MAX_TOKENS': '16000',
     # Investigation limits (AOCE-29)

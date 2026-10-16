@@ -47,8 +47,20 @@ async def test_create_sends_model_effort_and_fallbacks():
     assert LLMClient.text(resp) == "hello"
 
 
+async def test_haiku_omits_fallbacks():
+    client, messages = fake_client(response())
+    llm = LLMClient(Settings(model="claude-haiku-5-5"), client=client)
+
+    await llm.create([{"role": "user", "content": "hi"}])
+
+    params = messages.calls[0]
+    assert params["model"] == "claude-haiku-5-5"
+    assert "fallbacks" not in params
+    assert "betas" not in params
+
+
 async def test_refusal_raises():
     client, _ = fake_client(response(stop_reason="refusal"))
-    llm = LLMClient(Settings(), client=client)
+    llm = LLMClient(Settings(model="claude-opus-5-5"), client=client)
     with pytest.raises(LLMRefusalError, match="cyber"):
         await llm.create([{"role": "user", "content": "hi"}])
