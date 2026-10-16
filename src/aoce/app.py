@@ -34,8 +34,9 @@ class Incident(BaseModel):
     # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set.
     status: IncidentStatus = "queued"
     investigation: InvestigationResult | None = None
-    # Set on a failure a re-send should retry (transient API error, or cancelled at shutdown).
+    # Set on a transient API failure (overload, rate limit, network, 5xx) that a re-send should retry.
     retryable: bool = False
+    attempts: int = 1
 
 
 class IncidentStore:
@@ -72,6 +73,9 @@ class IncidentStore:
             if oldest_finished is None:
                 break
             self._evict(oldest_finished)
+
+    def remove(self, incident: Incident) -> None:
+        self._evict(incident)
 
     def _evict(self, incident: Incident) -> None:
         del self._incidents[incident.id]
@@ -161,7 +165,7 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
             incident.retryable = incident.investigation.retryable
     except asyncio.CancelledError:
         # Shutdown: leave a final status rather than "queued" or "investigating" forever.
-        incident.status, incident.retryable = "failed", True
+        incident.status = "failed"
         raise
     except Exception:
         log.exception("investigation of incident %s crashed", incident.id)
@@ -169,17 +173,25 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
     log.info("incident %s %s", incident.id, incident.status)
 
 
+MAX_ATTEMPTS = 3
+
+
 def open_incident_for(alert: Alert) -> Incident | None:
     """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
 
     A re-send of an alert whose investigation failed transiently (overload, rate limit, network,
-    5xx, or shutdown) opens a fresh incident and retries; a refusal, bad key or crash does not, so
-    an outage of that kind cannot re-bill and flush the store every repeat.
+    5xx) replaces the failed incident and retries, up to MAX_ATTEMPTS per alert, so an Anthropic
+    outage neither re-bills forever nor floods the store. A refusal, bad key or crash is not retried.
     """
     existing = INCIDENTS.find(alert)
-    if existing is not None and not (existing.status == "failed" and existing.retryable):
+    if existing is None:
+        return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
+    if existing.status != "failed" or not existing.retryable or existing.attempts >= MAX_ATTEMPTS:
         return None
-    return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
+    INCIDENTS.remove(existing)
+    return Incident(
+        id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert, attempts=existing.attempts + 1
+    )
 
 
 @app.get("/healthz")

@@ -97,6 +97,12 @@ def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
     INCIDENTS.get(first).retryable = True  # e.g. a 529 or a network error
     retry = client.post("/alerts", json=webhook("firing")).json()["incidents"]
     assert len(retry) == 1 and retry[0] != first
+    assert INCIDENTS.get(first) is None and INCIDENTS.get(retry[0]).attempts == 2  # replaced, not piled up
+    INCIDENTS.get(retry[0]).status, INCIDENTS.get(retry[0]).retryable = "failed", True
+    third = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+    INCIDENTS.get(third).status, INCIDENTS.get(third).retryable = "failed", True
+    assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []  # 3 attempts used
+    assert len(INCIDENTS) == 1
     assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
 
 

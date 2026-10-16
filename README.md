@@ -106,7 +106,10 @@ the webhook answers 503, so Alertmanager retries it with backoff. The last 200 i
 (`AOCE_MAX_INCIDENTS`). Follow it at
 `http://localhost:8000/incidents/<id>`: `status` goes `queued` → `investigating` → `concluded` /
 `inconclusive` / `failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are
-marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident.
+marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident, with two
+exceptions: an investigation that failed on a transient API error (429, 5xx, network) is retried up
+to 3 times, replacing the failed incident, and an alert whose incident has been dropped from memory
+is investigated afresh.
 
 ### Trying a tool by hand
 ```bash
