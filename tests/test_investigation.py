@@ -144,6 +144,13 @@ async def test_ignoring_the_wrap_up_ends_inconclusive():
     result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "token_budget"
     assert len(result.trace) == 1  # the tool call after the wrap-up was not run
+    report = result.report
+    assert report["fallback"] and report["root_cause"] is None and report["confidence"] == "low"
+    assert report["hypotheses"] == [
+        {"statement": "h", "status": "inconclusive", "evidence": ['echo {"x": "a"}']}
+    ]
+    assert report["checked"] == ["echo"] and report["not_checked"] == []
+    assert "token_budget" in report["summary"]
 
 
 async def test_ending_without_a_report_is_nudged_once():

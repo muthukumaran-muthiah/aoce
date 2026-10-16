@@ -156,6 +156,33 @@ def alert_prompt(alert: Alert) -> str:
     )
 
 
+def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
+    """A low-confidence report built from the trace, for when the model never called finish_investigation.
+
+    Same shape as the finish_investigation input, so readers of `report` need no special case.
+    """
+    hypotheses: dict[str, list[str]] = {}
+    for call in state.trace:
+        line = f"{call.tool} {json.dumps(call.input, default=str)}" + (" (error)" if call.is_error else "")
+        hypotheses.setdefault(call.hypothesis or "(no hypothesis given)", []).append(line)
+    called = {call.tool for call in state.trace}
+    return {
+        "summary": (
+            f"The investigation stopped at its {reason} limit before Claude reported. This report lists "
+            f"the {len(state.trace)} tool call(s) it made; no root cause was established."
+        ),
+        "root_cause": None,
+        "confidence": "low",
+        "hypotheses": [
+            {"statement": h, "status": "inconclusive", "evidence": evidence} for h, evidence in hypotheses.items()
+        ],
+        "recommended_action": None,
+        "checked": sorted(called),
+        "not_checked": [name for name in tools.names() if name not in called],
+        "fallback": True,
+    }
+
+
 def _tokens(usage: Any) -> int:
     return sum(
         getattr(usage, field, 0) or 0
@@ -208,8 +235,9 @@ class Investigator:
                 return
 
             if wrap_up is not None:
-                # Told to report on the previous turn and did not.
+                # Told to report on the previous turn and did not: report from the trace instead (AOCE-64).
                 state.stop_reason = wrap_up
+                state.report = fallback_report(state, self.tools, wrap_up)
                 return
 
             if not calls:
