@@ -130,6 +130,10 @@ async def close_investigator() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
+    # Stop investigations before closing the client they use, so each ends as cancelled, not as an API error.
+    for task in list(_tasks):
+        task.cancel()
+    await asyncio.gather(*_tasks, return_exceptions=True)
     await close_investigator()
 
 
@@ -154,8 +158,13 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
 
 
 def open_incident_for(alert: Alert) -> Incident | None:
-    """Return a new incident, or None if this alert already has an open one (Alertmanager re-sends)."""
-    if INCIDENTS.find(alert) is not None:
+    """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
+
+    A re-send of an alert whose investigation failed opens a fresh incident, so a transient
+    API or network error gets a retry on Alertmanager's next repeat.
+    """
+    existing = INCIDENTS.find(alert)
+    if existing is not None and existing.status != "failed":
         return None
     return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
 

@@ -156,7 +156,7 @@ def alert_prompt(alert: Alert) -> str:
     )
 
 
-_LIMIT_LABELS = {"max_steps": "step", "token_budget": "token budget", "soft_timeout": "time"}
+_LIMIT_LABELS = {"max_steps": "step", "token_budget": "token budget", "soft_timeout": "time", "timeout": "hard time"}
 
 
 def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
@@ -210,6 +210,8 @@ class Investigator:
                 await self._loop(alert, state)
         except TimeoutError:
             state.status, state.stop_reason = "inconclusive", "timeout"
+            if state.report is None:
+                state.report = fallback_report(state, self.tools, "timeout")
         except (LLMRefusalError, anthropic.APIError) as e:
             state.status, state.stop_reason, state.error = "failed", "error", str(e)
             log.warning("investigation failed: %s", e)

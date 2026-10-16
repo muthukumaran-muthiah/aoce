@@ -164,6 +164,7 @@ async def test_hard_timeout():
     llm = FakeLLM(response(text("x")), delay=1)
     result = await Investigator(llm, registry(), settings(investigation_timeout_s=0.05)).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "timeout"
+    assert result.report["fallback"] and "hard time limit" in result.report["summary"]
 
 
 async def test_refusal_fails_the_investigation():

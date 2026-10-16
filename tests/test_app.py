@@ -89,6 +89,39 @@ def test_resent_alert_does_not_open_a_second_incident(monkeypatch):
     assert len(client.get("/incidents").json()) == 1
 
 
+def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: None)
+    first = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+    INCIDENTS.get(first).status = "failed"
+    retry = client.post("/alerts", json=webhook("firing")).json()["incidents"]
+    assert len(retry) == 1 and retry[0] != first
+    assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
+
+
+def test_shutdown_cancels_running_investigations_before_closing_the_client(monkeypatch):
+    import asyncio
+
+    events = []
+
+    class Hangs:
+        async def investigate(self, alert):
+            events.append("started")
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            events.append("closed")
+
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: Hangs())
+    with TestClient(app, headers=AUTH) as c:
+        incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+        for _ in range(250):
+            if events:
+                break
+            time.sleep(0.02)
+    assert events == ["started", "closed"]
+    assert INCIDENTS.get(incident_id).status == "failed"
+
+
 def test_firing_alert_is_investigated_in_the_background(monkeypatch):
     from aoce.investigation import InvestigationResult
 
