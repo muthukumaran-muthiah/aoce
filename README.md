@@ -8,7 +8,8 @@ Jira project: AOCE.
 Everything runs on local Kubernetes and is driven by Tilt. No manual scripts.
 
 **Prerequisites**
-- `ANTHROPIC_API_KEY` exported in the shell that runs `tilt up` (Tilt puts it in a Kubernetes secret)
+- `ANTHROPIC_API_KEY` in a `.env` file at the repo root (`cp .env.example .env`, then fill it in; `.env` is gitignored). Exporting it in the shell that runs `tilt up` also works. Tilt puts it in a Kubernetes secret.
+- Agent settings (model, effort, investigation limits, backend URLs) are in `AGENT_SETTINGS` in the Tiltfile; edit a value and Tilt redeploys the agent.
 - Rancher Desktop with Kubernetes enabled, container engine **dockerd (moby)**, 4 CPUs and 10-12 GB memory
 - `tilt` and `helm` on PATH
 - kubectl context set to `rancher-desktop`
