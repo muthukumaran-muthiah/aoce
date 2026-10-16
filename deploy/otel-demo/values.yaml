@@ -102,7 +102,10 @@ prometheus:
         group_by: [alertname, service_name]
         group_wait: 10s
         group_interval: 1m
-        repeat_interval: 1h
+        # Re-send still-firing alerts every 5 minutes. The agent keeps incidents in memory until
+        # AOCE-31, so a redeploy forgets them; with a 1h repeat a firing alert would not come back
+        # for an hour. The agent ignores re-sends of an alert it already has (fingerprint + start).
+        repeat_interval: 5m
   server:
     resources: {requests: {cpu: 50m, memory: 250Mi}, limits: {memory: 500Mi}}
   # Rules use span metrics from SERVER spans, so a service is judged by the requests it serves.
