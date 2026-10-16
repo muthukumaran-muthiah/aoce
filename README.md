@@ -90,10 +90,13 @@ Each new firing alert starts an investigation in the background. Claude forms a 
 read-only tool to test it (every call carries the hypothesis it tests), and repeats until it reports
 through `finish_investigation`: summary, root cause, confidence, each hypothesis with its evidence,
 recommended action, and what was and was not checked. The loop stops at 12 steps, 300k tokens or 5
-minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with what it has, and an
-investigation that never reports ends as `inconclusive`. Follow it at
-`http://localhost:8000/incidents/<id>`: `status` goes `investigating` → `concluded` / `inconclusive` /
-`failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are
+minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with what it has, and if it
+still doesn't, the investigation ends as `inconclusive` with a low-confidence report built from its
+tool calls (`"fallback": true`). At most 2 investigations run at once
+(`AOCE_MAX_CONCURRENT_INVESTIGATIONS`) and the rest wait as `queued`; the last 200 incidents are kept
+in memory (`AOCE_MAX_INCIDENTS`). Follow it at
+`http://localhost:8000/incidents/<id>`: `status` goes `queued` → `investigating` → `concluded` /
+`inconclusive` / `failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are
 marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident.
 
 ### Trying a tool by hand
