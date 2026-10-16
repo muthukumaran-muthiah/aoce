@@ -143,7 +143,7 @@ def query_metrics_tool(settings, transport: httpx.AsyncBaseTransport | None = No
         end = _parse_end(args.get("end"))
         window_start = end - timedelta(minutes=minutes)
         start = window_start - timedelta(minutes=minutes)
-        step = max(15, minutes * 60 // 60)
+        step = max(15, minutes)  # seconds; ~120 points over the 2x window
 
         params = {"query": promql, "start": start.timestamp(), "end": end.timestamp(), "step": step}
         try:
