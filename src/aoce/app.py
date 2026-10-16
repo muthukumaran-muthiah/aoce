@@ -34,6 +34,8 @@ class Incident(BaseModel):
     # queued -> investigating -> concluded | inconclusive | failed; skipped when no API key is set.
     status: IncidentStatus = "queued"
     investigation: InvestigationResult | None = None
+    # Set on a failure a re-send should retry (transient API error, or cancelled at shutdown).
+    retryable: bool = False
 
 
 class IncidentStore:
@@ -156,9 +158,10 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
             incident.status = "investigating"
             incident.investigation = await investigator.investigate(incident.alert)
             incident.status = incident.investigation.status
+            incident.retryable = incident.investigation.retryable
     except asyncio.CancelledError:
         # Shutdown: leave a final status rather than "queued" or "investigating" forever.
-        incident.status = "failed"
+        incident.status, incident.retryable = "failed", True
         raise
     except Exception:
         log.exception("investigation of incident %s crashed", incident.id)
@@ -169,11 +172,12 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
 def open_incident_for(alert: Alert) -> Incident | None:
     """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
 
-    A re-send of an alert whose investigation failed opens a fresh incident, so a transient API
-    or network error gets a retry on Alertmanager's next repeat.
+    A re-send of an alert whose investigation failed transiently (overload, rate limit, network,
+    5xx, or shutdown) opens a fresh incident and retries; a refusal, bad key or crash does not, so
+    an outage of that kind cannot re-bill and flush the store every repeat.
     """
     existing = INCIDENTS.find(alert)
-    if existing is not None and existing.status != "failed":
+    if existing is not None and not (existing.status == "failed" and existing.retryable):
         return None
     return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
 
@@ -188,16 +192,15 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
     """Accept an Alertmanager webhook and open one incident per firing alert."""
     opened = []
     investigator = get_investigator()
+    settings = get_settings()
+    capacity = settings.max_concurrent_investigations + settings.max_queued_investigations
     for alert in payload.alerts:
         if alert.status != "firing":
             continue
         incident = open_incident_for(alert)
         if incident is None:
             continue
-        settings = get_settings()
-        if investigator is not None and INCIDENTS.active_count() >= (
-            settings.max_concurrent_investigations + settings.max_queued_investigations
-        ):
+        if investigator is not None and INCIDENTS.active_count() >= capacity:
             # Not stored, so it cannot push finished incidents out; Alertmanager's next re-send retries it.
             log.warning("investigation queue is full; dropping %s (%s)", alert.labels.get("alertname"), alert.service)
             continue

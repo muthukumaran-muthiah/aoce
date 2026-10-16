@@ -92,7 +92,9 @@ def test_resent_alert_does_not_open_a_second_incident(monkeypatch):
 def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
     monkeypatch.setattr("aoce.app.make_investigator", lambda: None)
     first = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
-    INCIDENTS.get(first).status = "failed"
+    INCIDENTS.get(first).status = "failed"  # not retryable: a re-send is still a duplicate
+    assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
+    INCIDENTS.get(first).retryable = True  # e.g. a 529 or a network error
     retry = client.post("/alerts", json=webhook("firing")).json()["incidents"]
     assert len(retry) == 1 and retry[0] != first
     assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
