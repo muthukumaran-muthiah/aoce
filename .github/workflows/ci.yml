@@ -39,5 +39,6 @@ jobs:
           grep -q "url: http://aoce-agent.aoce:8000/alerts" rendered.yaml
           grep -q "alert: HighErrorRate" rendered.yaml
           grep -q "alertmanagers:" rendered.yaml
+          grep -q "repeat_interval: 5m" rendered.yaml
           grep -A1 "span_metrics:" rendered.yaml | grep -q "metrics_flush_interval: 15s"
           grep -A3 "kind: StatefulSet" rendered.yaml | grep -q "name: alertmanager"
