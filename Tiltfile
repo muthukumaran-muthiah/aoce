@@ -70,13 +70,57 @@ for svc in ['accounting', 'ad', 'cart', 'checkout', 'currency', 'email',
 
 # ---------------------------------------------------------------------------
 # The AOCE agent API (AOCE-24). Rebuilt and redeployed on every code change.
-# ANTHROPIC_API_KEY is read from the shell that runs `tilt up`.
 # ---------------------------------------------------------------------------
 AOCE_NS = 'aoce'
 namespace_create(AOCE_NS)
+
+# Secrets. Put ANTHROPIC_API_KEY in a .env file at the repo root (copy .env.example;
+# .env is gitignored), or export it in the shell that runs `tilt up`. Never put the
+# key in this file: it is committed.
+load('ext://dotenv', 'dotenv')
+if os.path.exists('.env'):
+    dotenv('.env')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+if not ANTHROPIC_API_KEY:
+    warn('ANTHROPIC_API_KEY is not set: alerts will open incidents but nothing will investigate them. ' +
+         'Add it to .env and Tilt reloads.')
+watch_file('.env')
 k8s_yaml(secret_from_dict('aoce-anthropic', namespace=AOCE_NS,
-    inputs={'ANTHROPIC_API_KEY': os.getenv('ANTHROPIC_API_KEY', '')}))
+    inputs={'ANTHROPIC_API_KEY': ANTHROPIC_API_KEY}))
+
+# Agent settings, passed to the pod as environment variables (see src/aoce/config.py).
+# Edit a value here and Tilt redeploys the agent. URLs are in-cluster service names.
+AGENT_SETTINGS = {
+    'AOCE_MODEL': 'claude-opus-5-5',
+    'AOCE_EFFORT': 'high',                     # low | medium | high | xhigh | max
+    'AOCE_MAX_TOKENS': '16000',
+    # Investigation limits (AOCE-29)
+    'AOCE_INVESTIGATION_MAX_STEPS': '12',
+    'AOCE_INVESTIGATION_TIMEOUT_S': '300',
+    'AOCE_INVESTIGATION_TOKEN_BUDGET': '300000',
+    'AOCE_TOOL_TIMEOUT_S': '30',
+    # Backends the tools query
+    'AOCE_PROMETHEUS_URL': 'http://prometheus.otel-demo:9090',
+    'AOCE_PROMETHEUS_PUBLIC_URL': 'http://localhost:9090',
+    'AOCE_OPENSEARCH_URL': 'http://opensearch.otel-demo:9200',
+    'AOCE_JAEGER_URL': 'http://jaeger.otel-demo:16686',
+    # Demo-only monitoring role from the OTel Demo's init.sql (pg_monitor, read-only use).
+    'AOCE_DATABASE_URL': 'postgresql://monitoring_user:monitoring_password@astronomy-db.otel-demo:5432/astronomy_db',
+}
+
+def agent_manifests():
+    objs = decode_yaml_stream(read_file('deploy/agent/agent.yaml'))
+    for obj in objs:
+        if obj['kind'] == 'Deployment':
+            pod = obj['spec']['template']
+            container = pod['spec']['containers'][0]
+            container['env'] = container.get('env', []) + [
+                {'name': k, 'value': v} for k, v in AGENT_SETTINGS.items()]
+            # Restart the pod when the API key changes (the secret alone would not).
+            pod['metadata'].setdefault('annotations', {})['aoce/api-key-hash'] = str(hash(ANTHROPIC_API_KEY))
+    return encode_yaml_stream(objs)
+
 docker_build('aoce-agent', '.', only=['pyproject.toml', 'README.md', 'src'])
-k8s_yaml('deploy/agent/agent.yaml')
+k8s_yaml(agent_manifests())
 k8s_resource('aoce-agent', labels=['agent'], port_forwards=['8000:8000'],
-    links=[link('http://localhost:8000/docs', 'Agent API')])
+    links=[link('http://localhost:8000/docs', 'Agent API'), link('http://localhost:8000/incidents', 'Incidents')])

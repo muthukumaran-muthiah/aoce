@@ -1,3 +1,5 @@
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -51,3 +53,39 @@ def test_firing_alerts_open_incidents_and_resolved_are_ignored():
 
 def test_malformed_payload_is_rejected():
     assert client.post("/alerts", json={"alerts": []}).status_code == 422
+
+
+def test_without_api_key_incidents_are_skipped(monkeypatch):
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: None)
+    incident_id = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+    assert client.get(f"/incidents/{incident_id}").json()["status"] == "skipped"
+
+
+def test_unknown_incident_is_404():
+    assert client.get("/incidents/nope").status_code == 404
+
+
+def test_resent_alert_does_not_open_a_second_incident(monkeypatch):
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: None)
+    client.post("/alerts", json=webhook("firing"))
+    assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
+    assert len(client.get("/incidents").json()) == 1
+
+
+def test_firing_alert_is_investigated_in_the_background(monkeypatch):
+    from aoce.investigation import InvestigationResult
+
+    class FakeInvestigator:
+        async def investigate(self, alert):
+            return InvestigationResult(status="concluded", stop_reason="finished", report={"summary": "lock"}, steps=2)
+
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: FakeInvestigator())
+    with TestClient(app) as c:
+        incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+        for _ in range(50):
+            body = c.get(f"/incidents/{incident_id}").json()
+            if body["status"] == "concluded":
+                break
+            time.sleep(0.02)
+    assert body["status"] == "concluded"
+    assert body["investigation"]["report"] == {"summary": "lock"}

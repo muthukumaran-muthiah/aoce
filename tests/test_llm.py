@@ -41,6 +41,7 @@ async def test_create_sends_model_effort_and_fallbacks():
     assert params["output_config"] == {"effort": "high"}
     assert params["betas"] == [FALLBACK_BETA]
     assert params["fallbacks"] == "default"
+    assert params["cache_control"] == {"type": "ephemeral"}
     assert params["system"] == "sys"
     assert params["tools"] == [{"name": "t"}]
     assert LLMClient.text(resp) == "hello"
