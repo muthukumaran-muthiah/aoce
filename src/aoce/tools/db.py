@@ -6,8 +6,9 @@ role (pg_monitor in the OTel Demo), forces every transaction read-only with a st
 never kills sessions or writes.
 
 pg_stat_activity holds the live query text with its literal values (emails, tokens, order IDs), so
-those queries pass through redact_query before they reach the model or the incident trace (AOCE-39).
-pg_stat_statements text is already normalised by Postgres.
+all query text passes through redact_query before it reaches the model or the incident trace
+(AOCE-39). pg_stat_statements normalises most statements itself, but not every utility command
+(ALTER ROLE ... PASSWORD), so its text is redacted too.
 """
 
 import re
@@ -173,7 +174,7 @@ async def _fetch(conn: psycopg.AsyncConnection, sql: str, params: dict[str, Any]
 
 async def _slow_queries(conn, limit: int) -> dict[str, Any]:
     try:
-        rows = await _fetch(conn, SLOW_QUERIES_SQL, {"limit": limit})
+        rows = _redact_rows(await _fetch(conn, SLOW_QUERIES_SQL, {"limit": limit}), "query")
     except psycopg.errors.UndefinedTable:
         return {"error": "pg_stat_statements is not installed in this database", "sql": SLOW_QUERIES_SQL.strip()}
     return {"rows": rows, "sql": SLOW_QUERIES_SQL.strip()}

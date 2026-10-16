@@ -42,6 +42,8 @@ def monitoring_url():
         conn.execute("CREATE TABLE catalog.big (id INT, payload TEXT)")
         conn.execute("INSERT INTO catalog.big SELECT g, md5(g::text) FROM generate_series(1, 5000) g")
         conn.execute("ANALYZE catalog.big")
+        # pg_stat_statements keeps some utility statements verbatim, literals included.
+        conn.execute("COMMENT ON TABLE catalog.big IS 'owner jane@example.com'")
         for _ in range(3):
             conn.execute("SELECT count(*) FROM catalog.big WHERE payload LIKE 'ab%'")
     yield url_for(DB, user="monitoring_user", password="monitoring_password"), admin_db
@@ -65,6 +67,14 @@ async def test_overview_runs_every_check(monitoring_url):
     assert [r["table_name"] for r in out["seq_scans"]["rows"]] == ["catalog.big"]
     assert out["connections"]["summary"]["max_connections"] > 0
     assert out["blocking"]["blocked_sessions"] == []
+
+
+async def test_slow_queries_text_has_no_literals(monitoring_url):
+    url, _ = monitoring_url
+    out = await run(url, "slow_queries", limit=20)
+    texts = [r["query"] for r in out["slow_queries"]["rows"]]
+    assert any(t.startswith("COMMENT ON TABLE catalog.big") for t in texts)
+    assert "jane@example.com" not in json.dumps(out)
 
 
 async def test_blocking_names_the_lock_holder(monitoring_url):
