@@ -61,6 +61,6 @@ async def test_haiku_omits_fallbacks():
 
 async def test_refusal_raises():
     client, _ = fake_client(response(stop_reason="refusal"))
-    llm = LLMClient(Settings(), client=client)
+    llm = LLMClient(Settings(model="claude-opus-5-5"), client=client)
     with pytest.raises(LLMRefusalError, match="cyber"):
         await llm.create([{"role": "user", "content": "hi"}])

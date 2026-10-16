@@ -8,8 +8,8 @@ from aoce.config import Settings
 
 # Re-run a declined request on Anthropic's recommended fallback model instead of failing the investigation.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-# Haiku has no server-side fallback: a declined request stays declined, so the parameter is not sent.
-NO_FALLBACK_PREFIXES = ("claude-haiku-",)
+# Models that support the server-side fallback. Haiku does not, so other models get no fallback parameter.
+FALLBACK_MODEL_PREFIXES = ("claude-opus-", "claude-sonnet-", "claude-fable-")
 
 
 class LLMRefusalError(RuntimeError):
@@ -37,7 +37,7 @@ class LLMClient:
             # The system prompt and tool definitions repeat on every turn of an investigation.
             "cache_control": {"type": "ephemeral"},
         }
-        if not self.settings.model.startswith(NO_FALLBACK_PREFIXES):
+        if self.settings.model.startswith(FALLBACK_MODEL_PREFIXES):
             params["betas"] = [FALLBACK_BETA]
             params["fallbacks"] = "default"
         if system:
