@@ -16,6 +16,12 @@ class Settings(BaseSettings):
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
 
+    # Investigation limits (AOCE-29): model turns, wall-clock seconds, and total tokens across turns.
+    investigation_max_steps: int = 12
+    investigation_timeout_s: float = 300
+    investigation_token_budget: int = 300_000
+    tool_timeout_s: float = 30
+
     # Observability backends (defaults are in-cluster service names in namespace otel-demo)
     prometheus_url: str = "http://prometheus.otel-demo:9090"
     # Where a human opens Prometheus; used for clickable evidence links.

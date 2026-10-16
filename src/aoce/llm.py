@@ -34,6 +34,8 @@ class LLMClient:
             "output_config": {"effort": self.settings.effort},
             "betas": [FALLBACK_BETA],
             "fallbacks": "default",
+            # The system prompt and tool definitions repeat on every turn of an investigation.
+            "cache_control": {"type": "ephemeral"},
         }
         if system:
             params["system"] = system

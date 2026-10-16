@@ -61,7 +61,8 @@ Full catalogue with expected root causes: AOCE-22.
 
 ## Agent code
 ```
-src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents
+src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
+src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
 src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-opus-5-5, effort high, server-side refusal fallback)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
@@ -73,6 +74,17 @@ Prometheus evaluates two rules on span metrics from server spans: `HighErrorRate
 requests for 1 minute) and `HighLatencyP95` (p95 above 1s for 2 minutes). Alertmanager posts firing
 alerts to `http://aoce-agent.aoce:8000/alerts`. Check that the agent received them at
 http://localhost:8000/incidents.
+
+### Investigation loop (AOCE-29)
+Each new firing alert starts an investigation in the background. Claude forms a hypothesis, calls a
+read-only tool to test it (every call carries the hypothesis it tests), and repeats until it reports
+through `finish_investigation`: summary, root cause, confidence, each hypothesis with its evidence,
+recommended action, and what was and was not checked. The loop stops at 12 steps, 300k tokens or 5
+minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with what it has, and an
+investigation that never reports ends as `inconclusive`. Follow it at
+`http://localhost:8000/incidents/<id>`: `status` goes `investigating` → `concluded` / `inconclusive` /
+`failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are
+marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident.
 
 ### Trying a tool by hand
 ```bash
