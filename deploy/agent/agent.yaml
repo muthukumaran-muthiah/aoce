@@ -18,6 +18,9 @@ spec:
           ports:
             - containerPort: 8000
           env:
+            # Demo-only monitoring role from the OTel Demo's init.sql (pg_monitor, read-only use).
+            - name: AOCE_DATABASE_URL
+              value: postgresql://monitoring_user:monitoring_password@astronomy-db.otel-demo:5432/astronomy_db
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: {name: aoce-anthropic, key: ANTHROPIC_API_KEY, optional: true}

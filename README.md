@@ -41,6 +41,7 @@ Recommended Rancher Desktop VM: **4 CPUs, 10-12 GB memory**.
 | http://localhost:8080/loadgen | Load generator |
 | http://localhost:9090 | Prometheus API (metrics) |
 | http://localhost:9200 | OpenSearch API (logs) |
+| http://localhost:9093 | Alertmanager (sends alerts to the agent) |
 | localhost:15432 | Postgres `astronomy-db` (has `pg_stat_statements`) |
 
 ## Failure scenarios (flagd) relevant to the agent
@@ -64,5 +65,20 @@ src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook),
 src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-opus-5-5, effort high, server-side refusal fallback)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
+src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres)
+```
+
+### Alerts to the agent (AOCE-21)
+Prometheus evaluates two rules on span metrics from server spans: `HighErrorRate` (more than 5% failed
+requests for 1 minute) and `HighLatencyP95` (p95 above 1s for 2 minutes). Alertmanager posts firing
+alerts to `http://aoce-agent.aoce:8000/alerts`. Check that the agent received them at
+http://localhost:8000/incidents.
+
+### Trying a tool by hand
+```bash
+curl -s localhost:8000/tools/query_metrics -H 'content-type: application/json' \
+  -d '{"signal":"latency_p95","service":null,"promql":null,"window_minutes":15,"end":null}'
+curl -s localhost:8000/tools/db_diagnostics -H 'content-type: application/json' \
+  -d '{"check":"blocking","limit":10}'
 ```
 Tests run in CI (`.github/workflows/ci.yml`). Locally, in Docker: `docker run --rm -v "$PWD":/app -w /app python:3.12-slim sh -c 'pip install -q -e ".[dev]" && pytest -q'`

@@ -18,9 +18,14 @@ class Settings(BaseSettings):
 
     # Observability backends (defaults are in-cluster service names in namespace otel-demo)
     prometheus_url: str = "http://prometheus.otel-demo:9090"
+    # Where a human opens Prometheus; used for clickable evidence links.
+    prometheus_public_url: str = "http://localhost:9090"
     opensearch_url: str = "http://opensearch.otel-demo:9200"
     opensearch_logs_index: str = "otel-logs-*"
     jaeger_url: str = "http://jaeger.otel-demo:16686"
+
+    # Application database, read with a monitoring role (AOCE-57)
+    database_url: str | None = None
 
     # Change history (AOCE-23, AOCE-28)
     github_repo: str | None = None

@@ -77,11 +77,53 @@ jaeger:
     resources: {requests: {cpu: 50m, memory: 300Mi}, limits: {memory: 600Mi}}
 
 prometheus:
-  # Needed later for AOCE-21 (alerts -> agent webhook).
+  # AOCE-21: Prometheus evaluates the rules below and sends firing alerts to Alertmanager,
+  # which POSTs them to the agent's webhook (deploy/agent/agent.yaml).
   alertmanager:
-    enabled: false
+    enabled: true
+    fullnameOverride: alertmanager
+    persistence: {enabled: false}
+    resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+    config:
+      receivers:
+        - name: aoce-agent
+          webhook_configs:
+            - url: http://aoce-agent.aoce:8000/alerts
+              send_resolved: true
+      route:
+        receiver: aoce-agent
+        group_by: [alertname, service_name]
+        group_wait: 10s
+        group_interval: 1m
+        repeat_interval: 1h
   server:
     resources: {requests: {cpu: 50m, memory: 250Mi}, limits: {memory: 500Mi}}
+  # Rules use span metrics from SERVER spans, so a service is judged by the requests it serves.
+  # Thresholds are tuned for the demo's load generator; see AOCE-22 for which flag trips which rule.
+  serverFiles:
+    alerting_rules.yml:
+      groups:
+        - name: aoce-red
+          rules:
+            - alert: HighErrorRate
+              expr: |
+                sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER", status_code="STATUS_CODE_ERROR"}[2m]))
+                  / sum by (service_name) (rate(traces_span_metrics_calls_total{span_kind="SPAN_KIND_SERVER"}[2m]))
+                  > 0.05
+              for: 1m
+              labels: {severity: page}
+              annotations:
+                summary: "{{ $labels.service_name }} error rate is {{ $value | humanizePercentage }}"
+                description: "More than 5% of requests served by {{ $labels.service_name }} failed over the last 2 minutes."
+            - alert: HighLatencyP95
+              expr: |
+                histogram_quantile(0.95, sum by (service_name, le) (rate(traces_span_metrics_duration_milliseconds_bucket{span_kind="SPAN_KIND_SERVER"}[2m])))
+                  > 1000
+              for: 2m
+              labels: {severity: page}
+              annotations:
+                summary: "{{ $labels.service_name }} p95 latency is {{ $value | humanize }}ms"
+                description: "p95 latency of requests served by {{ $labels.service_name }} has been above 1s for 2 minutes."
 
 grafana:
   # Restarted 3x on the first run: raise the cap.
