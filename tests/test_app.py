@@ -133,6 +133,34 @@ def test_alerts_beyond_the_queue_bound_get_a_503_so_alertmanager_retries(monkeyp
     get_settings.cache_clear()
 
 
+def test_a_retry_dropped_by_a_full_queue_keeps_the_failed_incident(monkeypatch):
+    import asyncio
+
+    class Hangs:
+        async def investigate(self, alert):
+            await asyncio.Event().wait()
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: Hangs())
+    monkeypatch.setenv("AOCE_MAX_CONCURRENT_INVESTIGATIONS", "1")
+    monkeypatch.setenv("AOCE_MAX_QUEUED_INVESTIGATIONS", "0")
+    get_settings.cache_clear()
+    with TestClient(app, headers=AUTH) as c:
+        failed_alert = webhook("firing")
+        failed_alert["alerts"][0]["fingerprint"] = "f"
+        failed_id = c.post("/alerts", json=failed_alert).json()["incidents"][0]
+        INCIDENTS.get(failed_id).status, INCIDENTS.get(failed_id).retryable = "failed", True
+        INCIDENTS.get(failed_id).attempts = 2
+        busy = webhook("firing")
+        busy["alerts"][0]["fingerprint"] = "busy"
+        c.post("/alerts", json=busy)  # takes the only slot
+        assert c.post("/alerts", json=failed_alert).status_code == 503
+        assert INCIDENTS.get(failed_id).attempts == 2  # still there, attempts not reset
+    get_settings.cache_clear()
+
+
 def test_shutdown_cancels_running_investigations_before_closing_the_client(monkeypatch):
     import asyncio
 

@@ -180,7 +180,7 @@ def open_incident_for(alert: Alert) -> Incident | None:
     """Return a new incident, or None if this alert already has one (Alertmanager re-sends).
 
     A re-send of an alert whose investigation failed transiently (overload, rate limit, network,
-    5xx) replaces the failed incident and retries, up to MAX_ATTEMPTS per alert, so an Anthropic
+    5xx) gets a replacement incident (the caller swaps it in) and retries, up to MAX_ATTEMPTS per alert, so an Anthropic
     outage neither re-bills forever nor floods the store. A refusal, bad key or crash is not retried.
     """
     existing = INCIDENTS.find(alert)
@@ -188,7 +188,6 @@ def open_incident_for(alert: Alert) -> Incident | None:
         return Incident(id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert)
     if existing.status != "failed" or not existing.retryable or existing.attempts >= MAX_ATTEMPTS:
         return None
-    INCIDENTS.remove(existing)
     return Incident(
         id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert, attempts=existing.attempts + 1
     )
@@ -222,6 +221,8 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
             log.warning("investigation queue is full; dropping %s (%s)", alert.labels.get("alertname"), alert.service)
             dropped += 1
             continue
+        if (failed := INCIDENTS.find(alert)) is not None:
+            INCIDENTS.remove(failed)  # a retry replaces its failed incident; only now, past the queue check
         INCIDENTS.add(incident, settings.max_incidents)
         opened.append(incident.id)
         log.info("incident %s opened for %s (%s)", incident.id, alert.labels.get("alertname"), alert.service)
