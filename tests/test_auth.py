@@ -41,7 +41,7 @@ def test_alerts_reject_anything_but_the_webhook_token(secrets, headers):
     resp = client.post("/alerts", json=webhook("firing"), headers=headers)
     assert resp.status_code == 401
     assert resp.headers["www-authenticate"] == "Bearer"
-    assert INCIDENTS == {}
+    assert len(INCIDENTS) == 0
 
 
 def test_alerts_accept_the_webhook_token(secrets):

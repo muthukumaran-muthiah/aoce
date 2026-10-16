@@ -130,7 +130,7 @@ def test_one_investigator_is_reused_and_closed_on_shutdown(monkeypatch):
         return built[-1]
 
     monkeypatch.setattr("aoce.app.make_investigator", make)
-    with TestClient(app) as c:
+    with TestClient(app, headers=AUTH) as c:
         first = webhook("firing")
         second = webhook("firing")
         second["alerts"][0]["fingerprint"] = "other"
@@ -164,7 +164,7 @@ def test_investigations_beyond_the_cap_wait_as_queued(monkeypatch):
     def statuses(c):
         return sorted(i["status"] for i in c.get("/incidents").json())
 
-    with TestClient(app) as c:
+    with TestClient(app, headers=AUTH) as c:
         release = c.portal.call(asyncio.Event)
         c.post("/alerts", json=webhook("firing", "firing", "firing"))
         for _ in range(250):
