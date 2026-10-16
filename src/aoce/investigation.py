@@ -247,6 +247,8 @@ class Investigator:
                 # Told to report on the previous turn and did not: report from the trace instead (AOCE-64).
                 state.stop_reason = wrap_up
                 state.report = fallback_report(state, self.tools, wrap_up)
+                if answer := LLMClient.text(response):
+                    state.report["model_text"] = answer  # what Claude wrote instead of reporting
                 return
 
             if not calls:

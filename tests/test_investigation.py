@@ -151,6 +151,13 @@ async def test_ignoring_the_wrap_up_ends_inconclusive():
     ]
     assert report["checked"] == ["echo"] and report["not_checked"] == []
     assert "token budget limit" in report["summary"] and "not what they returned" in report["summary"]
+    assert "model_text" not in report
+
+
+async def test_a_plain_text_answer_to_the_wrap_up_is_kept():
+    llm = FakeLLM(response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500), response(text("It's the DB.")))
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    assert result.report["fallback"] and result.report["model_text"] == "It's the DB."
 
 
 async def test_ending_without_a_report_is_nudged_once():
