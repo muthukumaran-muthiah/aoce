@@ -86,9 +86,17 @@ jaeger:
 prometheus:
   # AOCE-21: Prometheus evaluates the rules below and sends firing alerts to Alertmanager,
   # which POSTs them to the agent's webhook (deploy/agent/agent.yaml).
+  # The demo chart turns the config reloader off, so Prometheus and Alertmanager only read their
+  # config at startup and ignore later changes to the rules or routes below. Turn it back on so an
+  # edit here takes effect without restarting the pods by hand.
+  configmapReload:
+    prometheus:
+      enabled: true
   alertmanager:
     enabled: true
     fullnameOverride: alertmanager
+    configmapReload:
+      enabled: true
     persistence: {enabled: false}
     resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
     config:
