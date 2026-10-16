@@ -15,6 +15,11 @@ spec:
       containers:
         - name: agent
           image: aoce-agent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            capabilities: {drop: [ALL]}
           ports:
             - containerPort: 8000
           env:
