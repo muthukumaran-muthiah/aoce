@@ -4,8 +4,14 @@ Missing indexes, slow queries and lock contention were the root cause in 3 of 6 
 interviews, and on-call engineers often lack DB access at night. This tool connects as a monitoring
 role (pg_monitor in the OTel Demo), forces every transaction read-only with a statement timeout, and
 never kills sessions or writes.
+
+pg_stat_activity holds the live query text with its literal values (emails, tokens, order IDs), so
+all query text passes through redact_query before it reaches the model or the incident trace
+(AOCE-39). pg_stat_statements normalises most statements itself, but not every utility command
+(ALTER ROLE ... PASSWORD), so its text is redacted too.
 """
 
+import re
 from decimal import Decimal
 from typing import Any
 
@@ -16,6 +22,7 @@ from aoce.tools import Tool, ToolError
 
 STATEMENT_TIMEOUT_MS = 5000
 LARGE_TABLE_ROWS = 1000
+QUERY_TEXT_CHARS = 300
 
 SLOW_QUERIES_SQL = """
 SELECT s.queryid::text AS queryid, s.calls,
@@ -23,7 +30,7 @@ SELECT s.queryid::text AS queryid, s.calls,
        round(s.mean_exec_time::numeric, 2) AS mean_ms,
        round(s.max_exec_time::numeric, 1) AS max_ms,
        s.rows,
-       left(regexp_replace(s.query, '\\s+', ' ', 'g'), 300) AS query
+       left(s.query, 2000) AS query
 FROM pg_stat_statements s
 JOIN pg_database d ON d.oid = s.dbid
 WHERE d.datname = current_database()
@@ -35,7 +42,7 @@ BLOCKED_SQL = """
 SELECT a.pid, a.usename, a.application_name, a.state, a.wait_event_type, a.wait_event,
        pg_blocking_pids(a.pid) AS blocked_by,
        round(extract(epoch FROM now() - a.query_start)::numeric, 1) AS waiting_s,
-       left(regexp_replace(a.query, '\\s+', ' ', 'g'), 300) AS query
+       left(a.query, 2000) AS query
 FROM pg_stat_activity a
 WHERE cardinality(pg_blocking_pids(a.pid)) > 0
 ORDER BY a.query_start
@@ -45,7 +52,7 @@ LIMIT %(limit)s
 BLOCKERS_SQL = """
 SELECT a.pid, a.usename, a.application_name, a.state,
        round(extract(epoch FROM now() - a.xact_start)::numeric, 1) AS xact_age_s,
-       left(regexp_replace(a.query, '\\s+', ' ', 'g'), 300) AS last_query,
+       left(a.query, 2000) AS last_query,
        (SELECT array_agg(DISTINCT l.mode || ' on ' || coalesce(l.relation::regclass::text, l.locktype))
           FROM pg_locks l WHERE l.pid = a.pid AND l.granted) AS locks_held
 FROM pg_stat_activity a
@@ -55,7 +62,7 @@ WHERE a.pid = ANY(%(pids)s)
 LONG_TRANSACTIONS_SQL = """
 SELECT a.pid, a.usename, a.application_name, a.state,
        round(extract(epoch FROM now() - a.xact_start)::numeric, 1) AS xact_age_s,
-       left(regexp_replace(a.query, '\\s+', ' ', 'g'), 300) AS last_query
+       left(a.query, 2000) AS last_query
 FROM pg_stat_activity a
 WHERE a.xact_start < now() - interval '30 seconds'
   AND a.backend_type = 'client backend'
@@ -103,6 +110,7 @@ open longer than 30 seconds. Use this first when a service backed by the databas
 - seq_scans: tables with at least 1000 rows read by sequential scans, a sign of a missing index.
 - connections: connection count by state and by client versus max_connections.
 - overview: all of the above in one call.
+Literal values in query text are replaced with $1, $2, ... placeholders.
 Returns rows plus the SQL that produced them so you can cite it."""
 
 INPUT_SCHEMA = {
@@ -114,6 +122,59 @@ INPUT_SCHEMA = {
     "required": ["check", "limit"],
     "additionalProperties": False,
 }
+
+
+# One token per match: identifiers and parameters are kept, comments are emptied, literals are replaced.
+_SQL_TOKEN = re.compile(
+    r"""
+      (?P<ident>"(?:[^"]|"")*"?)                              # "quoted identifier"
+    | (?P<block>/\*.*?(?:\*/|\Z))                             # /* comment */ (sqlcommenter tags)
+    | (?P<line>--[^\n]*)                                     # -- comment, to the end of its line
+    | (?P<param>\$\d+)                                        # existing $1 parameter
+    | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*|)\$.*?(?:\$(?P=tag)\$|\Z))  # $tag$ ... $tag$
+    | (?P<estring>(?<!\w)[eE]'(?:[^'\\]|''|\\.)*(?:'|\Z))           # E'...' with backslash escapes
+    | (?P<string>(?:(?<!\w)(?:[bBxXnN]|[uU]&))?'(?:[^']|'')*(?:'|\Z))     # '...', B'...', U&'...'
+    # 42, 3.14, 1.5e-3, 0x1F, 0o17, 0b101, 1_000: any word characters after a digit, to fail closed.
+    | (?P<number>(?<![\w$.])(?:\d\w*(?:\.\w*)?|\.\d\w*)(?:(?<=[eE])[+-]\d+)?)
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+
+def redact_query(query: str | None) -> str | None:
+    """Replace literal values in SQL text with $n placeholders, as pg_stat_statements does.
+
+    The text may be cut mid-literal (the SQL keeps 2000 characters), so an unterminated string is
+    redacted to the end. Comments are emptied, since they can carry values too (sqlcommenter tags);
+    nested block comments are not tracked. Numbering continues after the highest parameter already
+    in the query.
+    """
+    if not query:
+        return query
+    params = [int(m.group(0)[1:]) for m in _SQL_TOKEN.finditer(query) if m.lastgroup == "param"]
+    counter = max(params, default=0)
+
+    def replace(m: re.Match) -> str:
+        nonlocal counter
+        if m.group("ident") is not None or m.group("param") is not None:
+            return m.group(0)
+        if m.group("block") is not None or m.group("line") is not None:
+            return "/* */"  # also for --, so collapsing newlines later cannot comment out code
+        counter += 1
+        return f"${counter}"
+
+    return _SQL_TOKEN.sub(replace, query)
+
+
+def _query_text(query: str | None) -> str | None:
+    """Redact, then collapse whitespace and cut to QUERY_TEXT_CHARS. Redacting first lets a -- comment
+    end at its newline instead of swallowing the rest of the query."""
+    redacted = redact_query(query)
+    return " ".join(redacted.split())[:QUERY_TEXT_CHARS] if redacted else redacted
+
+
+def _redact_rows(rows: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    return [{**row, field: _query_text(row[field])} for row in rows]
 
 
 def _clean(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -133,7 +194,7 @@ def _slow_queries_unavailable(reason: str) -> dict[str, Any]:
 
 async def _slow_queries(conn, limit: int) -> dict[str, Any]:
     try:
-        rows = await _fetch(conn, SLOW_QUERIES_SQL, {"limit": limit})
+        rows = _redact_rows(await _fetch(conn, SLOW_QUERIES_SQL, {"limit": limit}), "query")
     except psycopg.errors.UndefinedTable:
         return _slow_queries_unavailable("the pg_stat_statements extension is not created in this database")
     except psycopg.errors.ObjectNotInPrerequisiteState:
@@ -142,10 +203,10 @@ async def _slow_queries(conn, limit: int) -> dict[str, Any]:
 
 
 async def _blocking(conn, limit: int) -> dict[str, Any]:
-    blocked = await _fetch(conn, BLOCKED_SQL, {"limit": limit})
+    blocked = _redact_rows(await _fetch(conn, BLOCKED_SQL, {"limit": limit}), "query")
     pids = sorted({pid for row in blocked for pid in row["blocked_by"]})
-    blockers = await _fetch(conn, BLOCKERS_SQL, {"pids": pids}) if pids else []
-    long_tx = await _fetch(conn, LONG_TRANSACTIONS_SQL, {"limit": limit})
+    blockers = _redact_rows(await _fetch(conn, BLOCKERS_SQL, {"pids": pids}), "last_query") if pids else []
+    long_tx = _redact_rows(await _fetch(conn, LONG_TRANSACTIONS_SQL, {"limit": limit}), "last_query")
     return {
         "blocked_sessions": blocked,
         "blockers": blockers,
