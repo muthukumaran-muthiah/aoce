@@ -35,8 +35,10 @@ class Incident(BaseModel):
 class IncidentStore:
     """Incidents in memory, newest last, capped at `max_incidents` (AOCE-62) until AOCE-31 adds a real store.
 
-    When full, the oldest finished incident is dropped; if every incident is still queued or
-    investigating, the oldest one goes. An index on (fingerprint, starts_at) spots Alertmanager re-sends.
+    When full, the oldest finished incident is dropped. Queued or investigating incidents are never
+    dropped, so a running task always has a readable record and a re-send cannot start a second
+    investigation; the store only exceeds the cap while that many are active. An index on
+    (fingerprint, starts_at) spots Alertmanager re-sends.
     """
 
     ACTIVE = ("queued", "investigating")
@@ -59,8 +61,10 @@ class IncidentStore:
         if key := self._key(incident.alert):
             self._by_alert[key] = incident.id
         while len(self._incidents) > max(limit, 1):
-            finished = (i for i in self._incidents.values() if i.status not in self.ACTIVE)
-            self._evict(next(finished, None) or next(iter(self._incidents.values())))
+            oldest_finished = next((i for i in self._incidents.values() if i.status not in self.ACTIVE), None)
+            if oldest_finished is None:
+                break
+            self._evict(oldest_finished)
 
     def _evict(self, incident: Incident) -> None:
         del self._incidents[incident.id]

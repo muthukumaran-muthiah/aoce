@@ -187,5 +187,8 @@ def test_incident_store_drops_the_oldest_finished_incident_first():
     assert store.find(incident(2, "concluded").alert) is None
     assert store.find(incident(1, "queued").alert).id == "i1"
 
-    store.add(incident(4, "queued"), limit=2)  # nothing finished: the oldest goes
-    assert [i.id for i in store.values()] == ["i3", "i4"]
+    store.add(incident(4, "queued"), limit=2)  # nothing finished: active incidents are never dropped
+    assert [i.id for i in store.values()] == ["i1", "i3", "i4"]
+    store.values()[0].status = "concluded"
+    store.add(incident(5, "queued"), limit=2)  # once one finishes, it is the one dropped
+    assert [i.id for i in store.values()] == ["i3", "i4", "i5"]
