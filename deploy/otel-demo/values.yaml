@@ -71,6 +71,13 @@ components:
 # --- Observability stack ---
 opentelemetry-collector:
   resources: {requests: {cpu: 20m, memory: 200Mi}, limits: {memory: 500Mi}}
+  config:
+    connectors:
+      # The span metrics connector flushes every 60s by default, so Prometheus gets one sample a
+      # minute and rate() over 1-2 minutes is empty or jumpy. 15s gives the alert rules and the
+      # agent's query_metrics tool enough samples to see a change within a minute.
+      span_metrics:
+        metrics_flush_interval: 15s
 
 jaeger:
   jaeger:

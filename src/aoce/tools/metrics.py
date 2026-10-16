@@ -17,6 +17,9 @@ from aoce.tools import Tool, ToolError
 
 CALLS = "traces_span_metrics_calls_total"
 DURATION_BUCKET = "traces_span_metrics_duration_milliseconds_bucket"
+# Same window as the alert rules in deploy/otel-demo/values.yaml. Span metrics arrive every 15s, so 2m
+# holds ~8 samples; a short spike is smoothed over 2 minutes.
+RATE_WINDOW = "2m"
 
 MAX_SERIES = 10
 MAX_POINTS = 20
@@ -67,15 +70,15 @@ def build_promql(signal: str, service: str | None) -> str:
     selector = 'span_kind="SPAN_KIND_SERVER"'
     if service:
         selector += f',service_name="{service}"'
-    calls = f"sum by (service_name) (rate({CALLS}{{{selector}}}[1m]))"
+    calls = f"sum by (service_name) (rate({CALLS}{{{selector}}}[{RATE_WINDOW}]))"
     if signal == "request_rate":
         return calls
     if signal == "error_rate":
-        errors = f'sum by (service_name) (rate({CALLS}{{{selector},status_code="STATUS_CODE_ERROR"}}[1m]))'
+        errors = f'sum by (service_name) (rate({CALLS}{{{selector},status_code="STATUS_CODE_ERROR"}}[{RATE_WINDOW}]))'
         # Services with zero errors have no error series; "or ... * 0" keeps them in the result as 0.
         return f"({errors} or {calls} * 0) / {calls}"
     if signal == "latency_p95":
-        return f"histogram_quantile(0.95, sum by (service_name, le) (rate({DURATION_BUCKET}{{{selector}}}[1m])))"
+        return f"histogram_quantile(0.95, sum by (service_name, le) (rate({DURATION_BUCKET}{{{selector}}}[{RATE_WINDOW}])))"
     raise ToolError(f"unknown signal: {signal}")
 
 
