@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
@@ -188,9 +188,14 @@ async def healthz() -> dict[str, str]:
 
 
 @app.post("/alerts", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_webhook_token)])
-async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
-    """Accept an Alertmanager webhook and open one incident per firing alert."""
+async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> dict[str, Any]:
+    """Accept an Alertmanager webhook and open one incident per firing alert.
+
+    If the queue was full for any alert, answer 503 so Alertmanager retries the batch with backoff
+    instead of waiting for `repeat_interval` (4h by default); alerts already opened dedup on retry.
+    """
     opened = []
+    dropped = 0
     investigator = get_investigator()
     settings = get_settings()
     capacity = settings.max_concurrent_investigations + settings.max_queued_investigations
@@ -201,8 +206,9 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
         if incident is None:
             continue
         if investigator is not None and INCIDENTS.active_count() >= capacity:
-            # Not stored, so it cannot push finished incidents out; Alertmanager's next re-send retries it.
+            # Not stored, so it cannot push finished incidents out; the 503 below makes Alertmanager retry.
             log.warning("investigation queue is full; dropping %s (%s)", alert.labels.get("alertname"), alert.service)
+            dropped += 1
             continue
         INCIDENTS.add(incident, settings.max_incidents)
         opened.append(incident.id)
@@ -214,6 +220,9 @@ async def receive_alerts(payload: AlertmanagerWebhook) -> dict[str, list[str]]:
         task = asyncio.create_task(run_investigation(incident, investigator))
         _tasks.add(task)
         task.add_done_callback(_tasks.discard)
+    if dropped:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        return {"incidents": opened, "dropped": dropped}
     return {"incidents": opened}
 
 

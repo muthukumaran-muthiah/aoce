@@ -101,8 +101,8 @@ minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with wha
 still doesn't, the investigation ends as `inconclusive` with a low-confidence report built from its
 tool calls (`"fallback": true`). At most 2 investigations run at once
 (`AOCE_MAX_CONCURRENT_INVESTIGATIONS`) and up to 20 more wait as `queued`
-(`AOCE_MAX_QUEUED_INVESTIGATIONS`). Beyond that, a new alert is logged and dropped without being
-stored, and is retried when Alertmanager next repeats it. The last 200 incidents are kept in memory
+(`AOCE_MAX_QUEUED_INVESTIGATIONS`). Beyond that, a new alert is dropped without being stored and
+the webhook answers 503, so Alertmanager retries it with backoff. The last 200 incidents are kept in memory
 (`AOCE_MAX_INCIDENTS`). Follow it at
 `http://localhost:8000/incidents/<id>`: `status` goes `queued` → `investigating` → `concluded` /
 `inconclusive` / `failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are

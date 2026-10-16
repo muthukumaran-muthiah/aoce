@@ -100,7 +100,7 @@ def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
     assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
 
 
-def test_alerts_beyond_the_queue_bound_are_dropped_and_retried_later(monkeypatch):
+def test_alerts_beyond_the_queue_bound_get_a_503_so_alertmanager_retries(monkeypatch):
     import asyncio
 
     class Hangs:
@@ -118,11 +118,12 @@ def test_alerts_beyond_the_queue_bound_are_dropped_and_retried_later(monkeypatch
         payload = webhook("firing", "firing", "firing")
         for n, alert in enumerate(payload["alerts"]):
             alert["fingerprint"] = f"q{n}"
-        assert len(c.post("/alerts", json=payload).json()["incidents"]) == 2
+        resp = c.post("/alerts", json=payload)
+        assert resp.status_code == 503  # so Alertmanager retries with backoff
+        assert len(resp.json()["incidents"]) == 2 and resp.json()["dropped"] == 1
         assert len(c.get("/incidents").json()) == 2  # the third was dropped, not stored
-        dropped = webhook("firing")
-        dropped["alerts"][0]["fingerprint"] = "q2"
-        assert c.post("/alerts", json=dropped).json()["incidents"] == []  # still full
+        retry = c.post("/alerts", json=payload)  # the two already open dedup; the third is still full
+        assert retry.status_code == 503 and retry.json() == {"incidents": [], "dropped": 1}
     get_settings.cache_clear()
 
 
