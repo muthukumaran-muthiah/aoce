@@ -42,7 +42,8 @@ class IncidentStore:
     When full, the oldest finished incident is dropped. Queued or investigating incidents are never
     dropped, so a running task always has a readable record and a re-send cannot start a second
     investigation; the store only exceeds the cap while that many are active. An index on
-    (fingerprint, starts_at) spots Alertmanager re-sends.
+    (fingerprint, starts_at) spots Alertmanager re-sends. An evicted incident's key goes with it, so
+    an alert still repeating after that many newer incidents is investigated again (AOCE-31).
     """
 
     ACTIVE = ("queued", "investigating")
