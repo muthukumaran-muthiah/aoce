@@ -101,12 +101,22 @@ prometheus:
       resources: {requests: {cpu: 5m, memory: 16Mi}, limits: {memory: 48Mi}}
     persistence: {enabled: false}
     resources: {requests: {cpu: 10m, memory: 32Mi}, limits: {memory: 64Mi}}
+    # AOCE-61: the agent only accepts webhooks carrying AOCE_WEBHOOK_TOKEN. Tilt puts the token from .env
+    # into secret aoce-webhook (namespace otel-demo); it is mounted here so it never appears in this file.
+    extraSecretMounts:
+      - name: aoce-webhook
+        mountPath: /etc/alertmanager/aoce
+        secretName: aoce-webhook
+        readOnly: true
     config:
       receivers:
         - name: aoce-agent
           webhook_configs:
             - url: http://aoce-agent.aoce:8000/alerts
               send_resolved: true
+              http_config:
+                authorization:
+                  credentials_file: /etc/alertmanager/aoce/token
       route:
         receiver: aoce-agent
         group_by: [alertname, service_name]

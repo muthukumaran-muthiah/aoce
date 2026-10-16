@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     model: str = "claude-haiku-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
+
+    # API authentication (AOCE-61). Alertmanager sends webhook_token as a bearer token on POST /alerts;
+    # api_key guards /incidents and /tools. Leaving one unset turns its endpoints off.
+    webhook_token: SecretStr | None = None
+    api_key: SecretStr | None = None
 
     # Investigation limits (AOCE-29): model turns, wall-clock seconds, and total tokens across turns.
     investigation_max_steps: int = 12

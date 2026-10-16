@@ -88,6 +88,20 @@ watch_file('.env')
 k8s_yaml(secret_from_dict('aoce-anthropic', namespace=AOCE_NS,
     inputs={'ANTHROPIC_API_KEY': ANTHROPIC_API_KEY}))
 
+# API authentication (AOCE-61), also from .env. AOCE_WEBHOOK_TOKEN is shared with Alertmanager, which
+# sends it as a bearer token on every webhook; AOCE_API_KEY is for you, on /incidents and /tools.
+AOCE_WEBHOOK_TOKEN = os.getenv('AOCE_WEBHOOK_TOKEN', '')
+AOCE_API_KEY = os.getenv('AOCE_API_KEY', '')
+if not AOCE_WEBHOOK_TOKEN:
+    warn('AOCE_WEBHOOK_TOKEN is not set: the agent rejects every alert. Add it to .env (e.g. openssl rand -hex 32).')
+if not AOCE_API_KEY:
+    warn('AOCE_API_KEY is not set: /incidents and /tools are turned off. Add it to .env to read incidents.')
+if AOCE_WEBHOOK_TOKEN and AOCE_WEBHOOK_TOKEN == AOCE_API_KEY:
+    warn('AOCE_WEBHOOK_TOKEN and AOCE_API_KEY are equal: Alertmanager could read incidents. Use two different values.')
+k8s_yaml(secret_from_dict('aoce-auth', namespace=AOCE_NS,
+    inputs={'AOCE_WEBHOOK_TOKEN': AOCE_WEBHOOK_TOKEN, 'AOCE_API_KEY': AOCE_API_KEY}))
+k8s_yaml(secret_from_dict('aoce-webhook', namespace=OTEL_DEMO_NS, inputs={'token': AOCE_WEBHOOK_TOKEN}))
+
 # Agent settings, passed to the pod as environment variables (see src/aoce/config.py).
 # Edit a value here and Tilt redeploys the agent. URLs are in-cluster service names.
 AGENT_SETTINGS = {
@@ -116,11 +130,13 @@ def agent_manifests():
             container = pod['spec']['containers'][0]
             container['env'] = container.get('env', []) + [
                 {'name': k, 'value': v} for k, v in AGENT_SETTINGS.items()]
-            # Restart the pod when the API key changes (the secret alone would not).
-            pod['metadata'].setdefault('annotations', {})['aoce/api-key-hash'] = str(hash(ANTHROPIC_API_KEY))
+            # Restart the pod when a secret changes (the secret alone would not).
+            pod['metadata'].setdefault('annotations', {})['aoce/api-key-hash'] = str(
+                hash('|'.join([ANTHROPIC_API_KEY, AOCE_WEBHOOK_TOKEN, AOCE_API_KEY])))
     return encode_yaml_stream(objs)
 
 docker_build('aoce-agent', '.', only=['pyproject.toml', 'README.md', 'src'])
 k8s_yaml(agent_manifests())
 k8s_resource('aoce-agent', labels=['agent'], port_forwards=['8000:8000'],
-    links=[link('http://localhost:8000/docs', 'Agent API'), link('http://localhost:8000/incidents', 'Incidents')])
+    # /incidents needs the API key, so open it from /docs (Authorize) or curl rather than a plain link.
+    links=[link('http://localhost:8000/docs', 'Agent API')])

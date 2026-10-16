@@ -5,8 +5,11 @@ from fastapi.testclient import TestClient
 
 import aoce.app
 from aoce.app import INCIDENTS, app
+from aoce.config import get_settings
 
-client = TestClient(app)
+# Same value for both secrets so one client can call every endpoint; tests/test_auth.py checks them apart.
+AUTH = {"Authorization": "Bearer test-token"}
+client = TestClient(app, headers=AUTH)
 
 
 def webhook(*statuses: str) -> dict:
@@ -40,6 +43,15 @@ def clear_incidents(monkeypatch):
     # Each test builds its own investigator through make_investigator.
     monkeypatch.setattr(aoce.app, "_investigator", None)
     monkeypatch.setattr(aoce.app, "_investigator_built", False)
+
+
+@pytest.fixture(autouse=True)
+def tokens(monkeypatch):
+    monkeypatch.setenv("AOCE_WEBHOOK_TOKEN", "test-token")
+    monkeypatch.setenv("AOCE_API_KEY", "test-token")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def test_healthz():
@@ -87,7 +99,7 @@ def test_firing_alert_is_investigated_in_the_background(monkeypatch):
             pass
 
     monkeypatch.setattr("aoce.app.make_investigator", lambda: FakeInvestigator())
-    with TestClient(app) as c:
+    with TestClient(app, headers=AUTH) as c:
         incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
         for _ in range(50):
             body = c.get(f"/incidents/{incident_id}").json()
