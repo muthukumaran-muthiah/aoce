@@ -22,6 +22,13 @@ spec:
             - name: ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef: {name: aoce-anthropic, key: ANTHROPIC_API_KEY, optional: true}
+            # API authentication (AOCE-61); an unset value turns those endpoints off.
+            - name: AOCE_WEBHOOK_TOKEN
+              valueFrom:
+                secretKeyRef: {name: aoce-auth, key: AOCE_WEBHOOK_TOKEN, optional: true}
+            - name: AOCE_API_KEY
+              valueFrom:
+                secretKeyRef: {name: aoce-auth, key: AOCE_API_KEY, optional: true}
           readinessProbe:
             httpGet: {path: /healthz, port: 8000}
           resources:

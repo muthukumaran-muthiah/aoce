@@ -37,6 +37,8 @@ jobs:
           helm template otel-demo open-telemetry/opentelemetry-demo --version 0.42.3 \
             -n otel-demo -f deploy/otel-demo/values.yaml > rendered.yaml
           grep -q "url: http://aoce-agent.aoce:8000/alerts" rendered.yaml
+          grep -q "credentials_file: /etc/alertmanager/aoce/token" rendered.yaml
+          grep -q "secretName: aoce-webhook" rendered.yaml
           grep -q "alert: HighErrorRate" rendered.yaml
           grep -q "alertmanagers:" rendered.yaml
           grep -q "repeat_interval: 5m" rendered.yaml

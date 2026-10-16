@@ -72,6 +72,7 @@ Expected symptoms come from reading the demo's source; each entry is `verified: 
 ## Agent code
 ```
 src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
+src/aoce/auth.py     Bearer-token checks for /alerts, /incidents and /tools (AOCE-61)
 src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
 src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
@@ -82,8 +83,14 @@ src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus)
 ### Alerts to the agent (AOCE-21)
 Prometheus evaluates two rules on span metrics from server spans: `HighErrorRate` (more than 5% failed
 requests for 1 minute) and `HighLatencyP95` (p95 above 1s for 2 minutes). Alertmanager posts firing
-alerts to `http://aoce-agent.aoce:8000/alerts`. Check that the agent received them at
-http://localhost:8000/incidents.
+alerts to `http://aoce-agent.aoce:8000/alerts`. Check that the agent received them:
+`curl -s localhost:8000/incidents -H "Authorization: Bearer $AOCE_API_KEY"`.
+
+### API authentication (AOCE-61)
+Set `AOCE_WEBHOOK_TOKEN` and `AOCE_API_KEY` in `.env` (`openssl rand -hex 32` each). Tilt puts them in
+Kubernetes secrets; Alertmanager reads the webhook token from a mounted secret and sends it as a bearer
+token on `POST /alerts`. `/incidents` and `/tools` need `Authorization: Bearer $AOCE_API_KEY` (in
+http://localhost:8000/docs use Authorize). An unset value turns its endpoints off (403); `/healthz` is open.
 
 ### Investigation loop (AOCE-29)
 Each new firing alert starts an investigation in the background. Claude forms a hypothesis, calls a
@@ -98,9 +105,9 @@ marked `skipped`. Alertmanager re-sends of the same alert do not open a second i
 
 ### Trying a tool by hand
 ```bash
-curl -s localhost:8000/tools/query_metrics -H 'content-type: application/json' \
+curl -s localhost:8000/tools/query_metrics -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"signal":"latency_p95","service":null,"promql":null,"window_minutes":15,"end":null}'
-curl -s localhost:8000/tools/db_diagnostics -H 'content-type: application/json' \
+curl -s localhost:8000/tools/db_diagnostics -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"check":"blocking","limit":10}'
 ```
 Tests run in CI (`.github/workflows/ci.yml`). Locally, in Docker: `docker run --rm -v "$PWD":/app -w /app python:3.12-slim sh -c 'pip install -q -e ".[dev]" && pytest -q'`
