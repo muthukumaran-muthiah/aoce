@@ -99,7 +99,7 @@ prometheus:
   server:
     resources: {requests: {cpu: 50m, memory: 250Mi}, limits: {memory: 500Mi}}
   # Rules use span metrics from SERVER spans, so a service is judged by the requests it serves.
-  # Thresholds are tuned for the demo's load generator; see AOCE-22 for which flag trips which rule.
+  # Thresholds are tuned for the demo's load generator; eval/failure_catalogue.yaml lists which flag trips which rule.
   serverFiles:
     alerting_rules.yml:
       groups:

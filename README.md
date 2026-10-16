@@ -45,20 +45,29 @@ Recommended Rancher Desktop VM: **4 CPUs, 10-12 GB memory**.
 | http://localhost:9093 | Alertmanager (sends alerts to the agent) |
 | localhost:15432 | Postgres `astronomy-db` (has `pg_stat_statements`) |
 
-## Failure scenarios (flagd) relevant to the agent
-| Flag | Scenario | Agent capability tested |
-|---|---|---|
-| `productCatalogLockContention` | Lock contention on the product catalog DB | DB diagnostics (AOCE-57), main demo candidate |
-| `paymentFailure` / `paymentUnreachable` | Payment errors / payment down | Error rate, dependency failure |
-| `cartFailure` | Cart fails n% | Error rate |
-| `kafkaQueueProblems` / `kafkaConsumerDead` | Consumer lag climbs | Queue backlog |
-| `emailMemoryLeak` | Memory leak | Saturation |
-| `adHighCpu` / `adManualGc` | CPU / GC pressure | Resource metrics |
-| `intlShippingSlowdown` / `imageSlowLoad` | Latency | p95 latency + traces |
-| `recommendationCacheFailure` | Cache failure | Dependency failure |
-| `emitRawPii` | Raw PII in telemetry | PII redaction test (AOCE-39) |
+## Failure scenarios (flagd)
+Turn a flag on at http://localhost:8080/feature. The ground truth for every flag (true root cause,
+mechanism with source links, expected alerts, metrics, traces, logs, decisive evidence, red herrings
+and what a report must say to get credit) is in [`eval/failure_catalogue.yaml`](eval/failure_catalogue.yaml) (AOCE-22).
+The 10 benchmark scenarios (AOCE-42):
 
-Full catalogue with expected root causes: AOCE-22.
+| Flag | What breaks | Pages the agent today |
+|---|---|---|
+| `productCatalogLockContention` | Table lock on `catalog.products` blocks product reads (main demo) | HighLatencyP95 product-catalog |
+| `paymentFailure` | payment rejects n% of charges | HighErrorRate payment, checkout |
+| `paymentUnreachable` | checkout calls a non-existent payment address | HighErrorRate checkout |
+| `productCatalogFailure` | GetProduct fails for one product (needs a targeting edit, see catalogue) | HighErrorRate product-catalog (borderline) |
+| `intlShippingSlowdown` | ShipOrder +10s for non-US orders | HighLatencyP95 checkout |
+| `recommendationCacheFailure` | Unbounded cache growth: latency and memory | HighLatencyP95 recommendation |
+| `adHighCpu` | Busy-loop threads in ad starve the node | Maybe, via latency |
+| `emailMemoryLeak` | Memory leak, OOMKilled restarts | No: needs a memory/restart rule |
+| `kafkaQueueProblems` | fraud-detection consumer lag | No: needs a consumer-lag rule |
+| `loadGeneratorFloodHomepage` | Traffic surge, no faulty service | HighLatencyP95 frontend (likely) |
+
+Also catalogued: `adFailure`, `adManualGc`, `cartFailure`, `imageSlowLoad` (extras); `emitRawPii`
+(not a fault, used for the PII redaction test, AOCE-39); `failedReadinessProbe` (no effect: the chart
+sets no readiness probe on cart); `aiRunawayAgent` / `aiSlowResponse` (the demo's own agent is off).
+Expected symptoms come from reading the demo's source; each entry is `verified: false` until a live run confirms it.
 
 ## Agent code
 ```
