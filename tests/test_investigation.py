@@ -6,6 +6,7 @@ import pytest
 from aoce.alerts import Alert
 from aoce.config import Settings
 from aoce.investigation import FINISH, Investigator, tool_definitions
+from aoce.llm import LLMRefusalError
 from aoce.tools import Tool, ToolError, ToolRegistry
 
 REPORT = {
@@ -154,3 +155,13 @@ async def test_hard_timeout():
     llm = FakeLLM(response(text("x")), delay=1)
     result = await Investigator(llm, registry(), settings(investigation_timeout_s=0.05)).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "timeout"
+
+
+async def test_refusal_fails_the_investigation():
+    class RefusingLLM:
+        async def create(self, messages, *, system=None, tools=None):
+            raise LLMRefusalError("request declined (category=cyber, request_id=req_1)")
+
+    result = await Investigator(RefusingLLM(), registry(), settings()).investigate(ALERT)
+    assert result.status == "failed" and result.stop_reason == "error"
+    assert "declined" in result.error
