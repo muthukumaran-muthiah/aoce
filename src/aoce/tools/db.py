@@ -126,11 +126,18 @@ async def _fetch(conn: psycopg.AsyncConnection, sql: str, params: dict[str, Any]
         return _clean(await cur.fetchall())
 
 
+def _slow_queries_unavailable(reason: str) -> dict[str, Any]:
+    # Report it and let the other checks run: the extension is optional on managed Postgres.
+    return {"error": f"slow queries unavailable: {reason}", "sql": SLOW_QUERIES_SQL.strip()}
+
+
 async def _slow_queries(conn, limit: int) -> dict[str, Any]:
     try:
         rows = await _fetch(conn, SLOW_QUERIES_SQL, {"limit": limit})
     except psycopg.errors.UndefinedTable:
-        return {"error": "pg_stat_statements is not installed in this database", "sql": SLOW_QUERIES_SQL.strip()}
+        return _slow_queries_unavailable("the pg_stat_statements extension is not created in this database")
+    except psycopg.errors.ObjectNotInPrerequisiteState:
+        return _slow_queries_unavailable("pg_stat_statements is not in shared_preload_libraries")
     return {"rows": rows, "sql": SLOW_QUERIES_SQL.strip()}
 
 
