@@ -176,8 +176,8 @@ _FALLBACK_LINE_CHARS = 300
 def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str) -> dict[str, Any]:
     """A low-confidence report built from the trace, for when the model never called finish_investigation.
 
-    Same shape as the finish_investigation input, plus `"fallback": True`, so readers of `report`
-    need no special case.
+    Same shape as the finish_investigation input, plus `"fallback": True` and, when Claude answered
+    in plain text instead, `model_text`; readers of `report` need no special case.
     """
     hypotheses: dict[str, list[str]] = {}
     for call in state.trace:
