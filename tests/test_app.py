@@ -3,6 +3,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+import aoce.app
 from aoce.app import INCIDENTS, app
 
 client = TestClient(app)
@@ -34,8 +35,11 @@ def webhook(*statuses: str) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def clear_incidents():
+def clear_incidents(monkeypatch):
     INCIDENTS.clear()
+    # Each test builds its own investigator through make_investigator.
+    monkeypatch.setattr(aoce.app, "_investigator", None)
+    monkeypatch.setattr(aoce.app, "_investigator_built", False)
 
 
 def test_healthz():
@@ -79,6 +83,9 @@ def test_firing_alert_is_investigated_in_the_background(monkeypatch):
         async def investigate(self, alert):
             return InvestigationResult(status="concluded", stop_reason="finished", report={"summary": "lock"}, steps=2)
 
+        async def aclose(self):
+            pass
+
     monkeypatch.setattr("aoce.app.make_investigator", lambda: FakeInvestigator())
     with TestClient(app) as c:
         incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
@@ -89,3 +96,33 @@ def test_firing_alert_is_investigated_in_the_background(monkeypatch):
             time.sleep(0.02)
     assert body["status"] == "concluded"
     assert body["investigation"]["report"] == {"summary": "lock"}
+
+
+def test_one_investigator_is_reused_and_closed_on_shutdown(monkeypatch):
+    from aoce.investigation import InvestigationResult
+
+    class FakeInvestigator:
+        closed = False
+
+        async def investigate(self, alert):
+            return InvestigationResult(status="concluded", stop_reason="finished", report={"summary": "lock"})
+
+        async def aclose(self):
+            self.closed = True
+
+    built = []
+
+    def make():
+        built.append(FakeInvestigator())
+        return built[-1]
+
+    monkeypatch.setattr("aoce.app.make_investigator", make)
+    with TestClient(app) as c:
+        first = webhook("firing")
+        second = webhook("firing")
+        second["alerts"][0]["fingerprint"] = "other"
+        c.post("/alerts", json=first)
+        c.post("/alerts", json=second)
+        assert len(built) == 1
+        assert not built[0].closed
+    assert built[0].closed

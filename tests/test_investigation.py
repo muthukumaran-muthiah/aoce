@@ -64,6 +64,8 @@ def registry(calls=None):
         calls.append(tool_input)
         if tool_input["x"] == "boom":
             raise ToolError("backend down")
+        if tool_input["x"] == "bug":
+            return {"x": {}["missing"]}
         if tool_input["x"] == "slow":
             await asyncio.sleep(1)
         return {"x": tool_input["x"]}
@@ -165,3 +167,29 @@ async def test_refusal_fails_the_investigation():
     result = await Investigator(RefusingLLM(), registry(), settings()).investigate(ALERT)
     assert result.status == "failed" and result.stop_reason == "error"
     assert "declined" in result.error
+
+
+async def test_unexpected_tool_exception_is_returned_to_the_model():
+    content, is_error = await registry().run("echo", {"x": "bug"})
+    assert is_error
+    assert content == "echo failed unexpectedly: KeyError: 'missing'"
+
+    llm = FakeLLM(response(tool_use("echo", {"x": "bug", "hypothesis": "h"})), response(tool_use(FINISH, REPORT, id="t2")))
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert result.status == "concluded"
+    assert result.trace[0].is_error
+    tool_result = llm.calls[1][-1]["content"][0]
+    assert tool_result["is_error"] and "KeyError" in tool_result["content"]
+
+
+async def test_registry_that_raises_does_not_fail_the_investigation():
+    class BrokenRegistry(ToolRegistry):
+        async def run(self, name, tool_input):
+            raise ValueError("bad JSON from Prometheus")
+
+    broken = BrokenRegistry(registry()._tools.values())
+    llm = FakeLLM(response(tool_use("echo", {"x": "a", "hypothesis": "h"})), response(tool_use(FINISH, REPORT, id="t2")))
+    result = await Investigator(llm, broken, settings()).investigate(ALERT)
+    assert result.status == "concluded"
+    assert result.trace[0].is_error
+    assert "ValueError: bad JSON from Prometheus" in result.trace[0].result_preview

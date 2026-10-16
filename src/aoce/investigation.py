@@ -169,6 +169,9 @@ class Investigator:
         self.tools = tools
         self.settings = settings
 
+    async def aclose(self) -> None:
+        await self.llm.aclose()
+
     async def investigate(self, alert: Alert) -> InvestigationResult:
         state = InvestigationResult(status="inconclusive", stop_reason="no_report")
         try:
@@ -250,6 +253,10 @@ class Investigator:
             )
         except TimeoutError:
             content, is_error = f"{call.name} timed out after {self.settings.tool_timeout_s:.0f}s", True
+        except Exception as e:
+            # The registry already turns handler errors into results; this guards the rest (AOCE-60).
+            log.exception("running tool %s failed", call.name)
+            content, is_error = f"{call.name} failed unexpectedly: {type(e).__name__}: {e}"[:500], True
         if len(content) > MAX_TOOL_RESULT_CHARS:
             content = content[:MAX_TOOL_RESULT_CHARS] + "\n[truncated]"
         record = ToolCall(
