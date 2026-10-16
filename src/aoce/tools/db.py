@@ -123,10 +123,12 @@ INPUT_SCHEMA = {
 }
 
 
-# One token per match: identifiers and parameters are kept, literals are replaced.
+# One token per match: identifiers and parameters are kept, comments are emptied, literals are replaced.
 _SQL_TOKEN = re.compile(
     r"""
       (?P<ident>"(?:[^"]|"")*"?)                              # "quoted identifier"
+    | (?P<block>/\*.*?(?:\*/|\Z))                             # /* comment */ (sqlcommenter tags)
+    | (?P<line>--.*)                                         # -- comment (newlines are collapsed)
     | (?P<param>\$\d+)                                        # existing $1 parameter
     | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*|)\$.*?(?:\$(?P=tag)\$|\Z))  # $tag$ ... $tag$
     | (?P<estring>(?<!\w)[eE]'(?:[^'\\]|''|\\.)*(?:'|\Z))           # E'...' with backslash escapes
@@ -141,7 +143,9 @@ def redact_query(query: str | None) -> str | None:
     """Replace literal values in SQL text with $n placeholders, as pg_stat_statements does.
 
     The text may be cut mid-literal (the SQL keeps 300 characters), so an unterminated string is
-    redacted to the end. Numbering continues after the highest parameter already in the query.
+    redacted to the end. Comments are emptied, since they can carry values too (sqlcommenter tags);
+    nested block comments are not tracked. Numbering continues after the highest parameter already
+    in the query.
     """
     if not query:
         return query
@@ -152,6 +156,10 @@ def redact_query(query: str | None) -> str | None:
         nonlocal counter
         if m.group("ident") is not None or m.group("param") is not None:
             return m.group(0)
+        if m.group("block") is not None:
+            return "/* */"
+        if m.group("line") is not None:
+            return "--"
         counter += 1
         return f"${counter}"
 
