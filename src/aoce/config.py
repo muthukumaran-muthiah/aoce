@@ -12,7 +12,7 @@ class Settings(BaseSettings):
 
     # LLM
     anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
-    model: str = "claude-opus-5-5"
+    model: str = "claude-haiku-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
 
