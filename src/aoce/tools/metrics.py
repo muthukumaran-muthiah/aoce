@@ -19,7 +19,8 @@ CALLS = "traces_span_metrics_calls_total"
 DURATION_BUCKET = "traces_span_metrics_duration_milliseconds_bucket"
 # Same window as the alert rules in deploy/otel-demo/values.yaml. Span metrics arrive every 15s, so 2m
 # holds ~8 samples; a short spike is smoothed over 2 minutes.
-RATE_WINDOW = "2m"
+RATE_WINDOW_S = 120
+RATE_WINDOW = f"{RATE_WINDOW_S // 60}m"
 
 MAX_SERIES = 10
 MAX_POINTS = 20
@@ -143,7 +144,9 @@ def query_metrics_tool(settings, transport: httpx.AsyncBaseTransport | None = No
         end = _parse_end(args.get("end"))
         window_start = end - timedelta(minutes=minutes)
         start = window_start - timedelta(minutes=minutes)
-        step = max(15, minutes)  # seconds; ~120 points over the 2x window
+        # Step in seconds: ~120 points over the 2x range, capped at the rate window so no samples fall
+        # between evaluations.
+        step = min(max(15, minutes), RATE_WINDOW_S)
 
         params = {"query": promql, "start": start.timestamp(), "end": end.timestamp(), "step": step}
         try:
