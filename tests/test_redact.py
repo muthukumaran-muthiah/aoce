@@ -2,7 +2,7 @@
 
 import pytest
 
-from aoce.tools.db import redact_query
+from aoce.tools.db import QUERY_TEXT_CHARS, _query_text, redact_query
 
 
 @pytest.mark.parametrize(
@@ -27,7 +27,7 @@ from aoce.tools.db import redact_query
             "SELECT 1 /* user=alice@example.com token=abc123 */ FROM t WHERE a = 'x'",
             "SELECT $1 /* */ FROM t WHERE a = $2",
         ),
-        ("SELECT a FROM t WHERE b = 2 -- don't log alice@example.com", "SELECT a FROM t WHERE b = $1 --"),
+        ("SELECT a FROM t WHERE b = 2 -- don't log alice@example.com", "SELECT a FROM t WHERE b = $1 /* */"),
         ("SELECT a /* cut off at 300 chars, bob@example.com", "SELECT a /* */"),
     ],
 )
@@ -51,3 +51,14 @@ def test_quote_inside_identifier_is_not_a_string():
 @pytest.mark.parametrize("query", [None, ""])
 def test_empty_query_passes_through(query):
     assert redact_query(query) == query
+
+
+def test_line_comment_ends_at_its_newline():
+    query = "SELECT a -- hint, ask bob@example.com\nFROM t\n  WHERE x = 1 LIMIT 5"
+    assert _query_text(query) == "SELECT a /* */ FROM t WHERE x = $1 LIMIT $2"
+
+
+def test_query_text_is_cut_after_redaction():
+    query = "SELECT * FROM t WHERE token = '" + "s" * 5000 + "' AND id = 7"
+    assert _query_text(query) == "SELECT * FROM t WHERE token = $1 AND id = $2"
+    assert len(_query_text("SELECT " + "a, " * 500)) == QUERY_TEXT_CHARS
