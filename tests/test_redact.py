@@ -16,6 +16,8 @@ from aoce.tools.db import redact_query
         ("SELECT E'a\\'b secret', 'x'", "SELECT $1, $2"),
         ("SELECT $body$ card 4111 1111 $body$, $$ssn$$", "SELECT $1, $2"),
         ("SELECT U&'d\\0061t', B'1010', X'1F', 1e9, .5", "SELECT $1, $2, $3, $4, $5"),
+        ("SELECT 0x1F, 0o17, 0b101, 1_000_000, 1.5e-3, 2E+10", "SELECT $1, $2, $3, $4, $5, $6"),
+        ("SELECT a FROM t WHERE b=3-1", "SELECT a FROM t WHERE b=$1-$2"),
         ("INSERT INTO orders VALUES ($1, 'paid', 3)", "INSERT INTO orders VALUES ($1, $2, $3)"),
         # Truncated at 300 characters in the middle of a literal.
         ("SELECT * FROM users WHERE ssn = '123-45-67", "SELECT * FROM users WHERE ssn = $1"),

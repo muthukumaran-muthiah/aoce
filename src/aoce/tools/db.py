@@ -133,7 +133,8 @@ _SQL_TOKEN = re.compile(
     | (?P<dollar>\$(?P<tag>[A-Za-z_]\w*|)\$.*?(?:\$(?P=tag)\$|\Z))  # $tag$ ... $tag$
     | (?P<estring>(?<!\w)[eE]'(?:[^'\\]|''|\\.)*(?:'|\Z))           # E'...' with backslash escapes
     | (?P<string>(?:(?<!\w)(?:[bBxXnN]|[uU]&))?'(?:[^']|'')*(?:'|\Z))     # '...', B'...', U&'...'
-    | (?P<number>(?<![\w$.])(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)  # 42, 3.14, 1e9
+    # 42, 3.14, 1.5e-3, 0x1F, 0o17, 0b101, 1_000: any word characters after a digit, to fail closed.
+    | (?P<number>(?<![\w$.])(?:\d\w*(?:\.\w*)?|\.\d\w*)(?:(?<=[eE])[+-]\d+)?)
     """,
     re.VERBOSE | re.DOTALL,
 )
