@@ -175,8 +175,9 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     return {
         "summary": (
             f"The investigation reached its {_LIMIT_LABELS.get(reason, "run")} limit before Claude reported. "
-            f"Each hypothesis's evidence lists the {len(state.trace)} tool call(s) it made, not what they "
-            "returned; no root cause was established."
+            f"Each hypothesis's evidence lists the {len(state.trace)} tool call(s) that completed (calls "
+            "still running at a hard timeout are not included), not what they returned; no root cause "
+            "was established."
         ),
         "root_cause": None,
         "confidence": "low",

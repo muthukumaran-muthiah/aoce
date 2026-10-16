@@ -289,3 +289,13 @@ def test_a_cancelled_investigation_is_marked_failed(monkeypatch):
 
     asyncio.run(go())
     assert incident.status == "failed"
+
+
+def test_a_negative_queue_bound_fails_at_startup(monkeypatch):
+    from pydantic import ValidationError
+
+    from aoce.config import Settings
+
+    monkeypatch.setenv("AOCE_MAX_QUEUED_INVESTIGATIONS", "-1")
+    with pytest.raises(ValidationError):
+        Settings()
