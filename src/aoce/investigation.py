@@ -240,6 +240,16 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     }
 
 
+def _wrap_up_block(reason: StopReason) -> dict[str, Any]:
+    return {
+        "type": "text",
+        "text": (
+            f"Investigation budget reached ({reason}). Do not call any more tools. Call "
+            f"{FINISH} now with what you have, marking unverified hypotheses inconclusive."
+        ),
+    }
+
+
 def _tokens(usage: Any) -> int:
     return sum(
         getattr(usage, field, 0) or 0
@@ -306,8 +316,11 @@ class Investigator:
                 continue
             truncated = 0
             messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason == "pause_turn" and state.steps < s.investigation_max_steps:
-                continue  # the API paused a long turn; sending it back lets the model resume
+            if response.stop_reason == "pause_turn":
+                # The API paused a long turn; sending it back lets the model resume. Limits still apply.
+                if wrap_up is None and (wrap_up := self._limit_reached(state, soft_deadline)) is not None:
+                    messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
+                continue
 
             calls = [b for b in response.content if b.type == "tool_use"]
             finish = next((b for b in calls if b.name == FINISH), None)
@@ -356,23 +369,20 @@ class Investigator:
                     }
                 )
 
-            if state.steps >= s.investigation_max_steps:
-                wrap_up = "max_steps"
-            elif state.tokens_used >= s.investigation_token_budget:
-                wrap_up = "token_budget"
-            elif time.monotonic() >= soft_deadline:
-                wrap_up = "soft_timeout"
+            wrap_up = self._limit_reached(state, soft_deadline)
             if wrap_up is not None:
-                content.append(
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Investigation budget reached ({wrap_up}). Do not call any more tools. Call "
-                            f"{FINISH} now with what you have, marking unverified hypotheses inconclusive."
-                        ),
-                    }
-                )
+                content.append(_wrap_up_block(wrap_up))
             messages.append({"role": "user", "content": content})
+
+    def _limit_reached(self, state: InvestigationResult, soft_deadline: float) -> StopReason | None:
+        s = self.settings
+        if state.steps >= s.investigation_max_steps:
+            return "max_steps"
+        if state.tokens_used >= s.investigation_token_budget:
+            return "token_budget"
+        if time.monotonic() >= soft_deadline:
+            return "soft_timeout"
+        return None
 
     async def _run_tool(self, step: int, call: Any) -> tuple[ToolCall, dict[str, Any]]:
         tool_input = dict(call.input)

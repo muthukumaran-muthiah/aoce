@@ -299,3 +299,14 @@ async def test_an_invalid_report_after_the_wrap_up_falls_back():
     )
     result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
     assert result.stop_reason == "token_budget" and result.report["fallback"]
+
+
+async def test_pause_turn_still_respects_the_budget():
+    llm = FakeLLM(
+        response(text("Checking..."), stop_reason="pause_turn", tokens=500),
+        response(tool_use(FINISH, {**REPORT, "root_cause": None, "confidence": "low"})),
+    )
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    wrap = llm.calls[1][-1]
+    assert wrap["role"] == "user" and "token_budget" in wrap["content"][0]["text"]
+    assert result.stop_reason == "finished"
