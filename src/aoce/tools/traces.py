@@ -26,8 +26,8 @@ from aoce.tools.logs import MASK, redact_log_text
 from aoce.tools.metrics import _parse_end
 
 MAX_TRACES = 20
-# Traces fetched when looking for the slowest ones without a duration floor; Jaeger returns the most
-# recent matches, so we fetch a wider sample and keep the slowest.
+# Recent traces fetched to pick the slowest (or, as a fallback, the failing) ones from; Jaeger returns
+# the most recent matches, not the slowest. Bounded so a search stays one modest response.
 SLOW_SAMPLE = 100
 TOP_SPANS = 5
 TOP_OPERATIONS = 10
@@ -222,13 +222,12 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
 
     roots = [s for s in spans if _parent_id(s) not in by_id] or spans
     root = min(roots, key=lambda s: s["startTime"]) if roots else None
-    start = min((s["startTime"] for s in spans), default=0)
-    end = max((s["startTime"] + s["duration"] for s in spans), default=0)
+    start = _start_us(trace)
     errors.sort(key=lambda e: e[0])
     summary = {
         "trace_id": trace.get("traceID"),
         "start": datetime.fromtimestamp(start / 1e6, UTC).isoformat() if spans else None,
-        "duration_ms": round((end - start) / 1000, 2),
+        "duration_ms": round(_duration_us(trace) / 1000, 2),
         "root": {
             "service": processes.get(root.get("processID"), {}).get("serviceName", "unknown"),
             "operation": _scrub(root["operationName"]),
@@ -319,11 +318,9 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
             params["operation"] = operation
         if min_duration_ms:
             params["minDuration"] = f"{min_duration_ms}ms"
-        # Jaeger returns the most recent matches in no particular order. For the slowest traces without a
-        # duration floor, take a wider sample and keep the slowest. The error fallback always scans the
-        # wide sample, since few of the recent traces may have failed.
-        sample = {**params, "limit": limit if min_duration_ms else max(limit, SLOW_SAMPLE)}
-        wide_sample = {**params, "limit": max(limit, SLOW_SAMPLE)}
+        # Jaeger returns the most recent matches, not the slowest, even with a duration floor. So the slow
+        # search and the error fallback take a wider sample of recent traces and pick from it.
+        sample = {**params, "limit": max(limit, SLOW_SAMPLE)}
         queries = []
         async with httpx.AsyncClient(base_url=settings.jaeger_url, timeout=15, transport=transport) as client:
             if kind == "error":
@@ -334,8 +331,8 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
                 if not traces:
                     # Not every Jaeger storage maps the OTel error status to the `error` tag; fall back to
                     # scanning recent traces for failed spans ourselves.
-                    queries.append(wide_sample)
-                    traces = await _search(client, wide_sample)
+                    queries.append(sample)
+                    traces = await _search(client, sample)
                     scanned = len(traces)
                 traces = [t for t in traces if any(_is_error(_tags(s.get("tags"))) for s in t.get("spans") or [])]
             else:

@@ -135,7 +135,7 @@ async def test_min_duration_and_operation_are_passed_to_jaeger():
     params = seen[0].url.params
     assert params["minDuration"] == "500ms"
     assert params["operation"] == "oteldemo.X/Get"
-    assert params["limit"] == "3"
+    assert int(params["limit"]) == SLOW_SAMPLE
     assert out["no_data"] is True
 
 
