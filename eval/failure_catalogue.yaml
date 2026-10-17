@@ -24,7 +24,7 @@
 #   grading             must_identify: facts the report must state for full credit
 #                       (naming only the flag, with no mechanism, is partial credit at best)
 #   tools               agent tools needed: query_metrics (AOCE-25, built), db_diagnostics (AOCE-57,
-#                       built), search_logs (AOCE-26), get_traces (AOCE-27), recent_changes (AOCE-28),
+#                       built), search_logs (AOCE-26, built), get_traces (AOCE-27), recent_changes (AOCE-28),
 #                       k8s_state (no ticket yet: pod restarts, OOMKilled, HPA replicas)
 #   giveaway_logs       log lines that name the flag outright. AOCE-42 must decide whether these
 #                       stay visible to the agent; with them, log search alone solves the scenario.
