@@ -313,12 +313,16 @@ class Investigator:
                     retry += f"do not call any more tools, call {FINISH} now with a concise report."
                 else:
                     retry += f"keep the {FINISH} report concise and make fewer tool calls per turn."
-                # Fold the notice into the last user turn rather than sending two user turns in a row.
+                # Fold the notice into the last user turn rather than sending two user turns in a row. After
+                # a resumed pause the last turn is the assistant's, so the notice is a new user turn there.
                 last = messages[-1]
-                content = last["content"]
-                if isinstance(content, str):
-                    content = [{"type": "text", "text": content}]
-                messages[-1] = {**last, "content": [*content, {"type": "text", "text": retry}]}
+                if last["role"] == "user":
+                    content = last["content"]
+                    if isinstance(content, str):
+                        content = [{"type": "text", "text": content}]
+                    messages[-1] = {**last, "content": [*content, {"type": "text", "text": retry}]}
+                else:
+                    messages.append({"role": "user", "content": retry})
                 continue
             truncated = 0
             messages.append({"role": "assistant", "content": response.content})

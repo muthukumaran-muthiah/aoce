@@ -332,6 +332,18 @@ async def test_pause_turn_still_respects_the_budget():
     assert result.stop_reason == "finished"
 
 
+async def test_a_truncation_after_a_pause_is_a_new_user_turn():
+    llm = FakeLLM(
+        response(text("Checking..."), stop_reason="pause_turn"),
+        response(tool_use(FINISH, {"summary": "x"}), stop_reason="max_tokens"),
+        response(tool_use(FINISH, REPORT, id="t3")),
+    )
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert [m["role"] for m in llm.calls[2]] == ["user", "assistant", "user"]
+    assert "output limit" in llm.calls[2][-1]["content"]
+    assert result.stop_reason == "finished"
+
+
 async def test_a_pause_with_tool_calls_runs_them():
     calls = []
     llm = FakeLLM(
