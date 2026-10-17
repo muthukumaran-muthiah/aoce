@@ -316,6 +316,17 @@ async def test_pause_turn_still_respects_the_budget():
     assert result.stop_reason == "finished"
 
 
+async def test_a_pause_with_tool_calls_runs_them():
+    calls = []
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"}), stop_reason="pause_turn"),
+        response(tool_use(FINISH, REPORT, id="t2")),
+    )
+    result = await Investigator(llm, registry(calls), settings()).investigate(ALERT)
+    assert calls == [{"x": "a"}] and result.stop_reason == "finished"
+    assert llm.calls[1][-1]["content"][0]["type"] == "tool_result"
+
+
 async def test_a_pause_after_the_wrap_up_falls_back():
     llm = FakeLLM(
         response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500),
