@@ -257,11 +257,12 @@ def rank_operations(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]
     }
 
 
-async def _search(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+async def _search(client: httpx.AsyncClient, params: dict[str, Any]) -> list[dict[str, Any]]:
     try:
         resp = await client.get("/api/traces", params=params)
     except httpx.HTTPError as e:
-        raise ToolError(f"Jaeger unreachable at {url}: {e}") from e
+        # The exception text can carry the URL, and with it any credentials in AOCE_JAEGER_URL.
+        raise ToolError(f"Jaeger unreachable: {type(e).__name__}") from e
     try:
         body = resp.json()
     except ValueError:
@@ -314,18 +315,18 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
             if kind == "error":
                 tagged = {**params, "tags": json.dumps({"error": "true"}), "limit": limit}
                 queries.append(tagged)
-                traces = await _search(client, settings.jaeger_url, tagged)
+                traces = await _search(client, tagged)
                 scanned = len(traces)
                 if not traces:
                     # Not every Jaeger storage maps the OTel error status to the `error` tag; fall back to
                     # scanning recent traces for failed spans ourselves.
                     queries.append(sample)
-                    traces = await _search(client, settings.jaeger_url, sample)
+                    traces = await _search(client, sample)
                     scanned = len(traces)
                 traces = [t for t in traces if any(_is_error(_tags(s.get("tags"))) for s in t.get("spans") or [])]
             else:
                 queries.append(sample)
-                traces = await _search(client, settings.jaeger_url, sample)
+                traces = await _search(client, sample)
                 scanned = len(traces)
 
         public = settings.jaeger_public_url
