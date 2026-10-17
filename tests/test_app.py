@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 import aoce.app
 from aoce.app import INCIDENTS, app
+from aoce.audit import AuditEntry
 from aoce.config import get_settings
 
 # Same value for both secrets so one client can call every endpoint; tests/test_auth.py checks them apart.
@@ -35,6 +36,12 @@ def webhook(*statuses: str) -> dict:
             for i, s in enumerate(statuses)
         ],
     }
+
+
+AUDIT_ENTRY = AuditEntry(
+    at="2026-10-13T08:01:00Z", incident_id="x", actor="agent", tool="echo", arguments={},
+    duration_ms=1, outcome="ok", result_chars=2,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -95,9 +102,11 @@ def test_resent_alert_reopens_after_a_failed_investigation(monkeypatch):
     INCIDENTS.get(first).status = "failed"  # not retryable: a re-send is still a duplicate
     assert client.post("/alerts", json=webhook("firing")).json()["incidents"] == []
     INCIDENTS.get(first).retryable = True  # e.g. a 529 or a network error
+    INCIDENTS.get(first).audit.append(AUDIT_ENTRY)
     retry = client.post("/alerts", json=webhook("firing")).json()["incidents"]
     assert len(retry) == 1 and retry[0] != first
     assert INCIDENTS.get(first) is None and INCIDENTS.get(retry[0]).attempts == 2  # replaced, not piled up
+    assert INCIDENTS.get(retry[0]).audit == [AUDIT_ENTRY]  # the failed attempt's calls carry over
     INCIDENTS.get(retry[0]).status, INCIDENTS.get(retry[0]).retryable = "failed", True
     third = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
     INCIDENTS.get(third).status, INCIDENTS.get(third).retryable = "failed", True

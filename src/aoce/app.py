@@ -38,7 +38,7 @@ class Incident(BaseModel):
     # Set on a transient API failure (overload, rate limit, network, 5xx) that a re-send should retry.
     retryable: bool = False
     attempts: int = 1
-    # Every tool call this incident's investigation made, in completion order, appended as they finish (AOCE-40).
+    # Every tool call this alert's investigations made, earlier failed attempts included, in completion order (AOCE-40).
     audit: list[AuditEntry] = []
 
 
@@ -193,7 +193,11 @@ def open_incident_for(alert: Alert) -> Incident | None:
     if existing.status != "failed" or not existing.retryable or existing.attempts >= MAX_ATTEMPTS:
         return None
     return Incident(
-        id=uuid.uuid4().hex[:12], received_at=datetime.now(UTC), alert=alert, attempts=existing.attempts + 1
+        id=uuid.uuid4().hex[:12],
+        received_at=datetime.now(UTC),
+        alert=alert,
+        attempts=existing.attempts + 1,
+        audit=list(existing.audit),  # earlier attempts' calls stay visible on the replacement (AOCE-40)
     )
 
 

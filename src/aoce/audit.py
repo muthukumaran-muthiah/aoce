@@ -1,8 +1,8 @@
 """Append-only audit log of every tool call (AOCE-40).
 
-Each call through the tool registry produces one `AuditEntry`: who made it, which tool, with what
-arguments, when, how long it took, how it ended and how much it returned. Entries are written as
-one JSON log line each on the `aoce.audit` logger, so they outlive the in-memory incident store, and
+Each call through the tool registry produces one `AuditEntry`: whether the agent or an operator made
+it (the shared API key does not identify a person), which tool, with what arguments, when, how long
+it took, how it ended and how much it returned. Entries are written as one JSON log line each on the `aoce.audit` logger, so they outlive the in-memory incident store, and
 appended to the incident whose investigation made the call. Calls made by hand through
 `POST /tools/{name}` have no incident and are logged with actor "operator".
 

@@ -110,7 +110,8 @@ the webhook answers 503, so Alertmanager retries it with backoff. The last 200 i
 `audit` is the incident's append-only audit log (AOCE-40): one entry per tool call as it finishes, with
 the time, tool, arguments, duration, outcome (`ok`, `error`, or `cancelled` when a timeout cut it off)
 and result size. Each entry, and each call made by hand through `POST /tools/{name}` (actor
-`operator`), is also logged as a JSON line on the `aoce.audit` logger. Without `ANTHROPIC_API_KEY` incidents are
+`operator`), is also logged as a JSON line on the `aoce.audit` logger; that log is the durable record,
+since incidents live only in memory. A retried incident keeps the entries of its failed attempts. Without `ANTHROPIC_API_KEY` incidents are
 marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident, with two
 exceptions: an investigation that failed on a transient API error (429, 5xx, network) is retried up
 to 3 times, replacing the failed incident, and an alert whose incident has been dropped from memory
