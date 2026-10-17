@@ -186,6 +186,8 @@ async def test_error_search_falls_back_to_scanning_recent_traces():
         ({"min_duration_ms": -1}, "zero or more"),
         ({"end": "yesterday"}, "not an ISO-8601"),
         ({"limit": "five"}, "must be integers"),
+        ({"min_duration_ms": 0.9}, "not a whole number"),
+        ({"min_duration_ms": True}, "not a whole number"),
     ],
 )
 async def test_bad_input_is_reported_to_the_model(overrides, message):
@@ -277,6 +279,12 @@ async def test_operation_names_are_scrubbed():
 
     assert out["traces"][0]["root"]["operation"] == "GET /users/[redacted]"
     assert "jane@example.com" not in json.dumps(out)
+
+
+def test_prose_apostrophes_are_kept():
+    from aoce.tools.traces import _scrub
+
+    assert _scrub("can't connect to 'db', it isn't ready") == "can't connect to [redacted], it isn't ready"
 
 
 async def test_error_fallback_runs_when_tagged_traces_have_no_failed_span():

@@ -111,12 +111,18 @@ def _text(value: Any) -> str:
 
 # Error text from drivers and frameworks quotes the offending value: `Key (email)=(jane@x.com)`,
 # `invalid input syntax for type uuid: "abc"`. Mask quoted and parenthesised values outright.
-_QUOTED = re.compile(r""""[^"]*"|'[^']*'|(?<==)\([^)]*\)""")
+# Quotes must open and close at a word boundary, so apostrophes in prose ("can't ... isn't") stay.
+_QUOTED = re.compile(r"""(?<!\w)"[^"\n]*"(?!\w)|(?<!\w)'[^'\n]*'(?!\w)|(?<==)\([^)]*\)""")
 
 
 def _scrub(value: Any) -> str:
     """Mask secrets, e-mails, card numbers and quoted literals in free text, then truncate it."""
     return _text(_QUOTED.sub(MASK, redact_log_text(str(value))))
+
+
+def _operation(name: Any) -> str:
+    """Span names: mask secrets and e-mails, keep quoted parts so distinct operations stay distinct."""
+    return _text(redact_log_text(str(name)))
 
 
 def _tags(tags: list[dict[str, Any]]) -> dict[str, Any]:
@@ -145,7 +151,7 @@ def _exception(span: dict[str, Any]) -> dict[str, Any] | None:
         fields = _tags(log.get("fields"))
         if fields.get("event") == "exception" or "exception.type" in fields:
             return {
-                "type": _text(fields.get("exception.type", "")),
+                "type": _scrub(fields.get("exception.type", "")),
                 "message": _scrub(fields.get("exception.message", "")),
             }
     return None
@@ -205,7 +211,7 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
         error = _is_error(tags)
         row = {
             "service": service,
-            "operation": _scrub(s["operationName"]),
+            "operation": _operation(s["operationName"]),
             "duration_ms": round(s["duration"] / 1000, 2),
             "self_ms": round(_self_time(s, children[s["spanID"]]) / 1000, 2),
             "error": error,
@@ -236,7 +242,7 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
         "duration_ms": round(_duration_us(trace) / 1000, 2),
         "root": {
             "service": processes.get(root.get("processID"), {}).get("serviceName", "unknown"),
-            "operation": _scrub(root["operationName"]),
+            "operation": _operation(root["operationName"]),
         }
         if root
         else None,
@@ -304,7 +310,11 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
             raise ToolError(f"unknown kind: {kind!r}")
         operation = args.get("operation") or None
         try:
-            min_duration_ms = None if args.get("min_duration_ms") is None else int(args["min_duration_ms"])
+            min_duration_ms = args.get("min_duration_ms")
+            if min_duration_ms is not None and (
+                isinstance(min_duration_ms, bool) or min_duration_ms != int(min_duration_ms)
+            ):
+                raise ValueError(f"min_duration_ms is not a whole number: {min_duration_ms!r}")
             limit = min(max(int(args.get("limit") or 5), 1), MAX_TRACES)
             minutes = min(max(int(args.get("window_minutes") or 15), 1), 180)
         except (TypeError, ValueError) as e:
@@ -322,8 +332,8 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
         }
         if operation:
             params["operation"] = operation
-        if min_duration_ms:
-            params["minDuration"] = f"{min_duration_ms}ms"
+        if min_duration_ms is not None and min_duration_ms > 0:
+            params["minDuration"] = f"{int(min_duration_ms)}ms"
         # Jaeger returns the most recent matches, not the slowest, even with a duration floor. So the slow
         # search and the error fallback take a wider sample of recent traces and pick from it.
         sample = {**params, "limit": max(limit, SLOW_SAMPLE)}
@@ -349,7 +359,7 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
 
         # Pick the traces to keep from their span bounds first, so only `limit` traces are summarised.
         traces.sort(key=_duration_us if kind == "slow" else _start_us, reverse=True)
-        public = settings.jaeger_public_url
+        public = settings.jaeger_public_url.rstrip("/")
         summaries, rows = [], []
         for trace in traces[:limit]:
             summary, trace_rows = summarise_trace(trace, f"{public}/trace/{quote(str(trace.get('traceID')), safe='')}")
