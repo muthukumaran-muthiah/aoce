@@ -239,8 +239,22 @@ async def test_a_truncated_finish_is_retried_not_stored():
     result = await Investigator(llm, registry(), settings()).investigate(ALERT)
     assert result.status == "concluded" and result.report == REPORT
     retry = llm.calls[1]
-    assert all(m["role"] != "assistant" for m in retry)  # the cut-off turn was dropped
-    assert "output limit" in retry[-1]["content"]
+    assert [m["role"] for m in retry] == ["user"]  # the cut-off turn was dropped, the notice folded in
+    assert "An alert is firing" in retry[0]["content"][0]["text"]
+    assert "output limit" in retry[0]["content"][-1]["text"]
+
+
+async def test_a_truncation_after_the_wrap_up_keeps_the_wrap_up():
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500),
+        response(tool_use(FINISH, {"summary": "x"}), stop_reason="max_tokens"),
+        response(tool_use(FINISH, REPORT, id="t3")),
+    )
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    last = llm.calls[2][-1]
+    assert last["role"] == "user" and last["content"][0]["type"] == "tool_result"
+    assert "do not call any more tools" in last["content"][-1]["text"]
+    assert result.stop_reason == "finished"
 
 
 async def test_a_truncated_tool_call_is_not_run():
@@ -303,6 +317,8 @@ async def test_an_invalid_report_after_the_wrap_up_falls_back():
     )
     result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
     assert result.stop_reason == "token_budget" and result.report["fallback"]
+    rejected = result.report["rejected_report"]
+    assert rejected["input"] == {"summary": "DB"} and "root_cause" in rejected["errors"]
 
 
 async def test_pause_turn_still_respects_the_budget():

@@ -1,6 +1,7 @@
 """Thin wrapper around the Anthropic Messages API used by the investigation loop (AOCE-29)."""
 
 import logging
+import re
 from typing import Any
 
 import anthropic
@@ -20,6 +21,9 @@ EFFORT_MODEL_PREFIXES = (
     "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5", "claude-fable-", "claude-mythos-",
 )
 
+# A prefix matches only up to a "-" or the end, so "claude-opus-5" does not match "claude-opus-50".
+_EFFORT_MODEL_RE = re.compile(rf"(?:{'|'.join(re.escape(p.rstrip('-')) for p in EFFORT_MODEL_PREFIXES)})(?:-|$)")
+
 
 class LLMRefusalError(RuntimeError):
     """The model (and its fallback) declined the request."""
@@ -29,7 +33,7 @@ class LLMClient:
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
         self.settings = settings
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-        self._send_effort = settings.model.startswith(EFFORT_MODEL_PREFIXES)
+        self._send_effort = bool(_EFFORT_MODEL_RE.match(settings.model))
         if not self._send_effort:
             log.warning("effort=%s is not sent: %s is not known to accept it", settings.effort, settings.model)
 

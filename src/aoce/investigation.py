@@ -138,7 +138,7 @@ class FinishReport(BaseModel):
 
 
 def _validation_errors(e: ValidationError) -> str:
-    return "; ".join(f"{'.'.join(map(str, err['loc'])) or 'input'}: {err['msg']}" for err in e.errors())[:500]
+    return "; ".join(f"{'.'.join(map(str, err['loc'])) or 'input'}: {err['msg']}" for err in e.errors())[:2000]
 
 
 class ToolCall(BaseModel):
@@ -299,21 +299,26 @@ class Investigator:
 
             if response.stop_reason in TRUNCATED_STOP_REASONS:
                 # A cut-off turn's last tool call may be partial, so it is never run or stored as the
-                # report. The turn is dropped and the model asked to retry, more briefly (AOCE-68).
+                # report. The turn is dropped and the model asked to retry, more briefly (AOCE-68). The
+                # dropped turn still counts as a step, so retries are bounded by the step limit too.
                 truncated += 1
                 if truncated > MAX_TRUNCATION_RETRIES or response.stop_reason == "model_context_window_exceeded":
                     state.stop_reason = "truncated"
                     state.report = fallback_report(state, self.tools, "truncated")
                     return
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your last reply hit the output limit and was discarded. Reply again, more "
-                            f"briefly: keep the {FINISH} report concise and make fewer tool calls per turn."
-                        ),
-                    }
-                )
+                if wrap_up is None:
+                    wrap_up = self._limit_reached(state, soft_deadline)
+                retry = "Your last reply hit the output limit and was discarded. Reply again, more briefly: "
+                if wrap_up is not None:
+                    retry += f"do not call any more tools, call {FINISH} now with a concise report."
+                else:
+                    retry += f"keep the {FINISH} report concise and make fewer tool calls per turn."
+                # Fold the notice into the last user turn rather than sending two user turns in a row.
+                last = messages[-1]
+                content = last["content"]
+                if isinstance(content, str):
+                    content = [{"type": "text", "text": content}]
+                messages[-1] = {**last, "content": [*content, {"type": "text", "text": retry}]}
                 continue
             truncated = 0
             messages.append({"role": "assistant", "content": response.content})
@@ -347,6 +352,10 @@ class Investigator:
                 state.report = fallback_report(state, self.tools, wrap_up)
                 if answer := LLMClient.text(response):
                     state.report["model_text"] = answer  # what Claude wrote instead of reporting
+                if finishes:
+                    # An invalid report on the last turn is kept for the reader, marked as rejected.
+                    first = finishes[0]
+                    state.report["rejected_report"] = {"input": first.input, "errors": finish_errors[first.id]}
                 return
 
             if not calls:
