@@ -8,6 +8,10 @@ dynamically as text with a .keyword subfield.
 
 The tool only calls _search, with a hard cap on hits, body length and attributes, and a server-side
 timeout, so a broad query cannot flood the model's context or load the cluster.
+
+Log text goes to the model and into the incident trace, so emails, bearer tokens, JWTs and key=value
+secrets are masked in bodies and attribute values, and attributes whose key looks sensitive are
+masked whole (as redact_query does for SQL, AOCE-39).
 """
 
 import re
@@ -27,6 +31,8 @@ ATTRIBUTE_CHARS = 200
 QUERY_CHARS = 200
 MAX_PATTERNS = 10
 SEARCH_TIMEOUT = "10s"
+# Exact counts beyond this cost a full scan of the matches; report a lower bound instead.
+TOTAL_HITS_CAP = 10_000
 
 SERVICE_FIELD = "resource.service.name"
 # OpenTelemetry severity numbers: the lowest number of each level (logs data model, SeverityNumber).
@@ -41,12 +47,25 @@ SEVERITY_TEXTS = {
 }
 LEVELS = list(SEVERITY_NUMBERS)
 
+MASK = "[redacted]"
+SENSITIVE_KEY = re.compile(r"auth|token|passw|secret|cookie|session|api[_.-]?key|credential|email|card|cvv", re.I)
+_SECRETS = [
+    (re.compile(r"\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.I), r"\1 " + MASK),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK),
+    (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), MASK),
+    (
+        re.compile(r"\b((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+", re.I),
+        r"\1" + MASK,
+    ),
+]
+
 DESCRIPTION = """\
 Search application logs in OpenSearch over a time window, filtered by service, minimum severity and \
 optional words in the log message. Returns the total number of matching records, counts per service \
 and per severity, the newest matching records (timestamp, service, severity, message, trace and span \
 id, a few attributes) and the most frequent message patterns among them (numbers and ids replaced with \
-#), plus the exact OpenSearch query so you can cite it.
+#), plus the exact OpenSearch query so you can cite it. Emails, tokens and other \
+secrets in messages and attributes are replaced with [redacted].
 Use it to find the errors a service logged around the alert time, or to check whether a suspect \
 service logged anything unusual. Start with min_severity "error" and no text; add text to look for a \
 specific message. Leave service null to see which services are logging errors at all."""
@@ -108,11 +127,22 @@ def build_query(service: str | None, min_severity: str, text: str | None, start:
     if service:
         filters.append(_either_field(SERVICE_FIELD, "term", service))
     if text:
-        filters.append({"simple_query_string": {"query": text, "fields": ["body"], "default_operator": "and"}})
+        # No fuzzy or regex operators: they are costly on a wildcard index.
+        filters.append(
+            {
+                "simple_query_string": {
+                    "query": text,
+                    "fields": ["body"],
+                    "default_operator": "and",
+                    "flags": "AND|OR|NOT|PHRASE|PREFIX|WHITESPACE|ESCAPE|PRECEDENCE",
+                    "analyze_wildcard": False,
+                }
+            }
+        )
     return {
         "size": limit,
         "timeout": SEARCH_TIMEOUT,
-        "track_total_hits": True,
+        "track_total_hits": TOTAL_HITS_CAP,
         "sort": [{"@timestamp": {"order": "desc"}}],
         "query": {"bool": {"filter": filters}},
         "_source": ["@timestamp", "body", "severity", "resource", "attributes", "traceId", "spanId"],
@@ -123,19 +153,27 @@ def build_query(service: str | None, min_severity: str, text: str | None, start:
     }
 
 
-_VARIABLE = re.compile(r"\b[0-9a-fA-F]{8,}\b|\b[0-9a-fA-F-]{36}\b|\d+(?:\.\d+)?")
+_VARIABLE = re.compile(r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b|\b[0-9a-fA-F]{8,}\b|\d+(?:\.\d+)?")
 
 
 def _pattern(body: str) -> str:
     return " ".join(_VARIABLE.sub("#", body).split())[:BODY_CHARS]
 
 
+def redact_log_text(text: str) -> str:
+    for pattern, replacement in _SECRETS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
 def _cut(value: Any, n: int) -> Any:
-    if isinstance(value, str) and len(value) > n:
-        return value[:n] + "…"
+    """Redact, then truncate, so a cut never leaves half a secret behind unmasked."""
     if not isinstance(value, str | int | float | bool | type(None)):
-        return _cut(str(value), n)
-    return value
+        value = str(value)
+    if not isinstance(value, str):
+        return value
+    value = redact_log_text(value)
+    return value[:n] + "…" if len(value) > n else value
 
 
 def _record(hit: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +188,10 @@ def _record(hit: dict[str, Any]) -> dict[str, Any]:
         "body": _cut(str(src.get("body", "")), BODY_CHARS),
         "trace_id": src.get("traceId") or None,
         "span_id": src.get("spanId") or None,
-        "attributes": {k: _cut(v, ATTRIBUTE_CHARS) for k, v in list(attributes.items())[:MAX_ATTRIBUTES]},
+        "attributes": {
+            k: MASK if SENSITIVE_KEY.search(k) else _cut(v, ATTRIBUTE_CHARS)
+            for k, v in list(attributes.items())[:MAX_ATTRIBUTES]
+        },
     }
 
 
@@ -179,12 +220,13 @@ def search_logs_tool(settings, transport: httpx.AsyncBaseTransport | None = None
             async with httpx.AsyncClient(base_url=settings.opensearch_url, timeout=15, transport=transport) as client:
                 resp = await client.post(f"/{index}/_search", params=params, json=query)
         except httpx.HTTPError as e:
-            raise ToolError(f"OpenSearch unreachable at {settings.opensearch_url}: {e}") from e
+            # No URL in the message: it goes to the model and could carry credentials (user:pass@host).
+            raise ToolError(f"OpenSearch unreachable: {type(e).__name__}") from e
         body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
         if resp.status_code != 200 or "hits" not in body:
             error = body.get("error", resp.text[:300])
             if isinstance(error, dict):
-                error = error.get("root_cause", [{}])[0].get("reason") or error.get("reason") or error
+                error = (error.get("root_cause") or [{}])[0].get("reason") or error.get("reason") or error
             raise ToolError(f"OpenSearch error ({resp.status_code}): {str(error)[:300]}")
 
         hits = body["hits"]["hits"]
@@ -196,6 +238,7 @@ def search_logs_tool(settings, transport: httpx.AsyncBaseTransport | None = None
         return {
             "window": {"start": start.isoformat(), "end": end.isoformat()},
             "total_matches": total_count,
+            "total_is_lower_bound": isinstance(total, dict) and total.get("relation") == "gte",
             "returned": len(records),
             "timed_out": bool(body.get("timed_out")),
             "by_service": _buckets(aggs, "by_service"),

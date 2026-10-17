@@ -6,7 +6,7 @@ import pytest
 
 from aoce.config import Settings
 from aoce.tools import ToolRegistry, build_registry
-from aoce.tools.logs import BODY_CHARS, MAX_ATTRIBUTES, build_query, search_logs_tool
+from aoce.tools.logs import BODY_CHARS, MAX_ATTRIBUTES, build_query, redact_log_text, search_logs_tool
 
 END = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
 
@@ -105,7 +105,9 @@ def test_query_filters_service_severity_and_text():
     # Records with only a severity text still match, in any case, for warn and above but not info.
     assert '"WARNING"' in text and '"error"' in text and '"Fatal"' in text and '"INFO"' not in text
     assert '{"term": {"resource.service.name.keyword": "cart"}}' in text
-    assert filters[-1] == {"simple_query_string": {"query": "timeout -retry", "fields": ["body"], "default_operator": "and"}}
+    text_query = filters[-1]["simple_query_string"]
+    assert text_query["query"] == "timeout -retry" and text_query["fields"] == ["body"]
+    assert "FUZZY" not in text_query["flags"] and "ALL" not in text_query["flags"]
 
 
 def test_query_without_service_or_text_has_only_time_and_severity():
@@ -185,3 +187,62 @@ def test_definition_is_strict_and_registered():
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
     assert "search_logs" in build_registry(Settings()).names()
+
+
+@pytest.mark.parametrize(
+    "text, leaked",
+    [
+        ("login failed for jane.doe@example.com", "jane.doe@example.com"),
+        ("upstream sent Authorization: Bearer abc.DEF-123_xyz", "abc.DEF-123_xyz"),
+        ("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl rejected", "eyJzdWIiOiIxIn0"),
+        ("retrying with password=hunter2&user=bob", "hunter2"),
+        ('config {"api_key": "sk-123456"}', "sk-123456"),
+    ],
+)
+def test_secrets_are_redacted_from_log_text(text, leaked):
+    out = redact_log_text(text)
+    assert leaked not in out and "[redacted]" in out
+
+
+async def test_records_are_redacted_before_they_reach_the_model():
+    body = "x" * (BODY_CHARS - 10) + " mail bob@example.com now"
+    hits = [hit("cart", body, **{"http.request.header.authorization": "Basic Ym9iOnB3", "user.email": "a@b.co",
+                                  "error.message": "token=abcd1234 expired", "order.id": "42"})]
+    registry, _ = registry_with(lambda r: httpx.Response(200, json=response(hits)))
+
+    content, _ = await registry.run("search_logs", args())
+
+    assert "bob@ex" not in content and "Ym9iOnB3" not in content and "a@b.co" not in content
+    record = json.loads(content)["records"][0]
+    assert record["attributes"]["http.request.header.authorization"] == "[redacted]"
+    assert record["attributes"]["user.email"] == "[redacted]"
+    assert record["attributes"]["error.message"] == "token=[redacted] expired"
+    assert record["attributes"]["order.id"] == "42"
+
+
+async def test_capped_total_is_reported_as_a_lower_bound():
+    body = response([hit("cart", "boom")])
+    body["hits"]["total"] = {"value": 10_000, "relation": "gte"}
+    registry, seen = registry_with(lambda r: httpx.Response(200, json=body))
+    out = json.loads((await registry.run("search_logs", args()))[0])
+    assert out["total_is_lower_bound"] is True
+    assert json.loads(seen[0].content)["track_total_hits"] == 10_000
+
+
+async def test_error_without_root_cause_and_unreachable_message_have_no_url():
+    registry, _ = registry_with(lambda r: httpx.Response(500, json={"error": {"root_cause": [], "reason": "all shards failed"}}))
+    content, is_error = await registry.run("search_logs", args())
+    assert is_error and "all shards failed" in content
+
+    def boom(request):
+        raise httpx.ConnectError("connection refused to http://user:pw@os")
+
+    registry, _ = registry_with(boom)
+    content, is_error = await registry.run("search_logs", args())
+    assert is_error and "unreachable" in content and "pw@" not in content and "http://" not in content
+
+
+def test_patterns_collapse_uuids_whole():
+    from aoce.tools.logs import _pattern
+
+    assert _pattern("cart 123e4567-e89b-12d3-a456-426614174000 missing") == "cart # missing"
