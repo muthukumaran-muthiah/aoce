@@ -359,7 +359,8 @@ class Investigator:
                 if finishes:
                     # An invalid report on the last turn is kept for the reader, marked as rejected.
                     first = finishes[0]
-                    state.report["rejected_report"] = {"input": first.input, "errors": finish_errors[first.id]}
+                    rejected = json.dumps(first.input, default=str)[:MAX_TOOL_RESULT_CHARS]
+                    state.report["rejected_report"] = {"input": rejected, "errors": finish_errors[first.id]}
                 return
 
             if not calls:

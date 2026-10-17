@@ -318,7 +318,7 @@ async def test_an_invalid_report_after_the_wrap_up_falls_back():
     result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
     assert result.stop_reason == "token_budget" and result.report["fallback"]
     rejected = result.report["rejected_report"]
-    assert rejected["input"] == {"summary": "DB"} and "root_cause" in rejected["errors"]
+    assert rejected["input"] == '{"summary": "DB"}' and "root_cause" in rejected["errors"]
 
 
 async def test_pause_turn_still_respects_the_budget():
