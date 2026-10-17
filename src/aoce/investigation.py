@@ -14,7 +14,7 @@ import time
 from typing import Any, Literal
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aoce.alerts import Alert
 from aoce.config import Settings
@@ -26,6 +26,10 @@ log = logging.getLogger("aoce.investigation")
 FINISH = "finish_investigation"
 MAX_TOOL_RESULT_CHARS = 20_000
 SOFT_DEADLINE_FRACTION = 0.8
+# Stop reasons that mean the turn was cut off: a tool call in it may be incomplete (AOCE-68).
+TRUNCATED_STOP_REASONS = {"max_tokens", "model_context_window_exceeded"}
+# Consecutive cut-off turns allowed before the investigation ends from the trace.
+MAX_TRUNCATED_TURNS = 2
 
 SYSTEM_PROMPT = """\
 You are AOCE, an on-call engineer investigating a production alert in a microservices system: the \
@@ -107,7 +111,33 @@ FINISH_TOOL = {
     },
 }
 
-StopReason = Literal["finished", "max_steps", "token_budget", "soft_timeout", "timeout", "no_report", "error"]
+StopReason = Literal[
+    "finished", "max_steps", "token_budget", "soft_timeout", "timeout", "no_report", "truncated", "error"
+]
+
+
+class _Hypothesis(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    statement: str
+    status: Literal["confirmed", "rejected", "inconclusive"]
+    evidence: list[str]
+
+
+class FinishReport(BaseModel):
+    """The finish_investigation input, checked before it is stored as the report (AOCE-68)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    summary: str = Field(min_length=1)
+    root_cause: str | None
+    confidence: Literal["low", "medium", "high"]
+    hypotheses: list[_Hypothesis]
+    recommended_action: str | None
+    checked: list[str]
+    not_checked: list[str]
+
+
+def _validation_errors(e: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(map(str, err['loc'])) or 'input'}: {err['msg']}" for err in e.errors())[:500]
 
 
 class ToolCall(BaseModel):
@@ -187,6 +217,8 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     called = {call.tool for call in state.trace}
     if reason == "no_report":
         opening = "Claude stopped without reporting, even after a reminder. "
+    elif reason == "truncated":
+        opening = "Claude's replies were cut off at the output limit, so no report was received. "
     else:
         opening = f"The investigation reached its {_LIMIT_LABELS.get(reason, 'run')} limit before Claude reported. "
     summary = opening + (
@@ -247,20 +279,50 @@ class Investigator:
         messages: list[dict[str, Any]] = [{"role": "user", "content": alert_prompt(alert)}]
         wrap_up: StopReason | None = None
         nudged = False
+        truncated = 0
 
         while True:
             state.steps += 1
             response = await self.llm.create(messages, system=SYSTEM_PROMPT, tools=definitions)
             state.tokens_used += _tokens(response.usage)
+
+            if response.stop_reason in TRUNCATED_STOP_REASONS:
+                # A cut-off turn's last tool call may be partial, so it is never run or stored as the
+                # report. The turn is dropped and the model asked to retry, more briefly (AOCE-68).
+                truncated += 1
+                if truncated >= MAX_TRUNCATED_TURNS:
+                    state.stop_reason = "truncated"
+                    state.report = fallback_report(state, self.tools, "truncated")
+                    return
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            "Your last reply hit the output limit and was discarded. Reply again, more "
+                            f"briefly: keep the {FINISH} report concise and make fewer tool calls per turn."
+                        ),
+                    }
+                )
+                continue
+            truncated = 0
             messages.append({"role": "assistant", "content": response.content})
+            if response.stop_reason == "pause_turn" and state.steps < s.investigation_max_steps:
+                continue  # the API paused a long turn; sending it back lets the model resume
 
             calls = [b for b in response.content if b.type == "tool_use"]
             finish = next((b for b in calls if b.name == FINISH), None)
+            finish_error: str | None = None
             if finish is not None:
-                state.report = finish.input
-                state.status = "concluded" if finish.input.get("root_cause") else "inconclusive"
-                state.stop_reason = "finished"
-                return
+                try:
+                    report = FinishReport.model_validate(finish.input)
+                except ValidationError as e:
+                    finish_error = _validation_errors(e)
+                    log.warning("invalid %s input: %s", FINISH, finish_error)
+                else:
+                    state.report = report.model_dump()
+                    state.status = "concluded" if report.root_cause else "inconclusive"
+                    state.stop_reason = "finished"
+                    return
 
             if wrap_up is not None:
                 # Told to report on the previous turn and did not: report from the trace instead (AOCE-64).
@@ -281,9 +343,18 @@ class Investigator:
                 messages.append({"role": "user", "content": f"Report your findings by calling {FINISH}."})
                 continue
 
-            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls))
+            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls if c is not finish))
             state.trace.extend(call for call, _ in results)
             content: list[dict[str, Any]] = [block for _, block in results]
+            if finish is not None:
+                content.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": finish.id,
+                        "content": f"Report rejected, not stored: {finish_error}. Call {FINISH} again with a corrected report.",
+                        "is_error": True,
+                    }
+                )
 
             if state.steps >= s.investigation_max_steps:
                 wrap_up = "max_steps"

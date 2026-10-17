@@ -81,3 +81,12 @@ async def test_real_client_can_be_closed():
     llm = LLMClient(Settings(anthropic_api_key="k"))
     await llm.aclose()
     assert llm._client.is_closed()
+
+
+async def test_effort_is_omitted_for_models_that_reject_it():
+    client, messages = fake_client(response())
+    await LLMClient(Settings(model="claude-haiku-4-5"), client=client).create([{"role": "user", "content": "hi"}])
+    await LLMClient(Settings(model="claude-haiku-5-5", effort="low"), client=client).create([{"role": "user", "content": "hi"}])
+
+    assert "output_config" not in messages.calls[0]
+    assert messages.calls[1]["output_config"] == {"effort": "low"}
