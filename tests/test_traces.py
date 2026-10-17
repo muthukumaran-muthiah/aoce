@@ -266,3 +266,14 @@ async def test_free_text_in_errors_is_scrubbed():
     assert failed["exception"]["message"] == "duplicate key violates unique constraint: Key (email)=[redacted]"
     assert failed["attributes"]["otel.status_description"] == "invalid input syntax for type uuid: [redacted]"
     assert "jane@example.com" not in json.dumps(out) and "a1b2" not in json.dumps(out)
+
+
+async def test_operation_names_are_scrubbed():
+    trace = checkout_trace("t1")
+    trace["spans"][0]["operationName"] = "GET /users/jane@example.com"
+    registry, _ = registry_with(lambda r: httpx.Response(200, json={"data": [trace]}))
+
+    out = json.loads((await registry.run("get_traces", args()))[0])
+
+    assert out["traces"][0]["root"]["operation"] == "GET /users/[redacted]"
+    assert "jane@example.com" not in json.dumps(out)

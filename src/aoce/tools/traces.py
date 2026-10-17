@@ -201,7 +201,7 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
         error = _is_error(tags)
         row = {
             "service": service,
-            "operation": s["operationName"],
+            "operation": _scrub(s["operationName"]),
             "duration_ms": round(s["duration"] / 1000, 2),
             "self_ms": round(_self_time(s, children[s["spanID"]]) / 1000, 2),
             "error": error,
@@ -211,7 +211,7 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
             entry = {
                 "span_id": s["spanID"],
                 "service": service,
-                "operation": s["operationName"],
+                "operation": row["operation"],
                 "duration_ms": row["duration_ms"],
                 "attributes": _kept_attributes(tags),
             }
@@ -231,7 +231,7 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
         "duration_ms": round((end - start) / 1000, 2),
         "root": {
             "service": processes.get(root.get("processID"), {}).get("serviceName", "unknown"),
-            "operation": root["operationName"],
+            "operation": _scrub(root["operationName"]),
         }
         if root
         else None,
