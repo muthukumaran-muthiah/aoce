@@ -6,6 +6,7 @@ API for settings.github_repo. github_token is optional for a public repo (60 req
 it); use a fine-grained token with read-only Contents and Deployments access.
 """
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -138,7 +139,10 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
         path = args.get("path") or None
         if path and not PATH_RE.match(path):
             raise ToolError(f"invalid path: {path!r}")
-        minutes = min(max(int(args.get("window_minutes") or 60), 5), 1440)
+        try:
+            minutes = min(max(int(args.get("window_minutes") or 60), 5), 1440)
+        except (TypeError, ValueError) as e:
+            raise ToolError(f"window_minutes must be an integer: {args.get('window_minutes')!r}") from e
         end = _parse_end(args.get("end"))
         start = end - timedelta(minutes=minutes)
 
@@ -146,10 +150,16 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
         if path:
             commit_params["path"] = path
         async with gh.client() as client:
-            commits = await gh.get(client, "/commits", commit_params)
-            # Deployments and releases have no time filter; the newest page covers any recent window.
-            deployments = await gh.get(client, "/deployments", {"per_page": MAX_CHANGES})
-            releases = await gh.get(client, "/releases", {"per_page": 10})
+            if path:
+                # Deployments and releases are repo-wide, so a path filter skips them.
+                commits, deployments, releases = await gh.get(client, "/commits", commit_params), [], []
+            else:
+                # Deployments and releases have no time filter; the newest page covers any recent window.
+                commits, deployments, releases = await asyncio.gather(
+                    gh.get(client, "/commits", commit_params),
+                    gh.get(client, "/deployments", {"per_page": MAX_CHANGES}),
+                    gh.get(client, "/releases", {"per_page": 10}),
+                )
 
         changes: list[dict[str, Any]] = []
         for c in commits:
@@ -165,40 +175,41 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
                     "url": c.get("html_url"),
                 }
             )
-        if not path:
-            for d in deployments:
-                when = _parse_time(d.get("created_at"))
-                if _in_window(when, start, end):
-                    changes.append(
-                        {
-                            "kind": "deployment",
-                            "time": _iso(when),
-                            "sha": (d.get("sha") or "")[:12],
-                            "title": f"deploy {d.get('ref')} to {d.get('environment')}"
-                            + (f": {d['description']}" if d.get("description") else ""),
-                            "author": (d.get("creator") or {}).get("login"),
-                            "url": d.get("url"),
-                        }
-                    )
-            for r in releases:
-                when = _parse_time(r.get("published_at"))
-                if _in_window(when, start, end) and not r.get("draft"):
-                    changes.append(
-                        {
-                            "kind": "release",
-                            "time": _iso(when),
-                            "sha": r.get("tag_name"),
-                            "title": r.get("name") or r.get("tag_name"),
-                            "author": (r.get("author") or {}).get("login"),
-                            "url": r.get("html_url"),
-                        }
-                    )
+        for d in deployments:
+            when = _parse_time(d.get("created_at"))
+            if _in_window(when, start, end):
+                changes.append(
+                    {
+                        "kind": "deployment",
+                        "time": _iso(when),
+                        "sha": (d.get("sha") or "")[:12],
+                        "title": f"deploy {d.get('ref')} to {d.get('environment')}"
+                        + (f": {d['description']}" if d.get("description") else ""),
+                        "author": (d.get("creator") or {}).get("login"),
+                        "url": d.get("url"),
+                    }
+                )
+        for r in releases:
+            when = _parse_time(r.get("published_at"))
+            if _in_window(when, start, end) and not r.get("draft"):
+                changes.append(
+                    {
+                        "kind": "release",
+                        "time": _iso(when),
+                        "sha": r.get("tag_name"),
+                        "title": r.get("name") or r.get("tag_name"),
+                        "author": (r.get("author") or {}).get("login"),
+                        "url": r.get("html_url"),
+                    }
+                )
         changes.sort(key=lambda ch: ch["time"] or "", reverse=True)
         return {
             "repo": repo,
             "window": {"start": start.isoformat(), "end": end.isoformat()},
             "changes": changes[:MAX_CHANGES],
             "changes_truncated": max(0, len(changes) - MAX_CHANGES),
+            # One page of commits; a full page means older commits in the window were not fetched.
+            "more_commits": len(commits) >= MAX_CHANGES,
             "no_changes": not changes,
             "evidence": {
                 "commits_url": f"https://github.com/{repo}/commits?since={_iso(start)}&until={_iso(end)}"

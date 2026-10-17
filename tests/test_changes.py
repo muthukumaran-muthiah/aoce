@@ -94,6 +94,16 @@ async def test_path_filter_only_lists_commits():
     out = json.loads((await reg.run("recent_changes", changes_args(path="src/product-catalog")))[0])
     assert seen[0].url.params["path"] == "src/product-catalog"
     assert {c["kind"] for c in out["changes"]} == {"commit"}
+    assert len(seen) == 1  # no deployment or release calls spent on a path query
+
+
+async def test_a_full_page_of_commits_is_flagged():
+    commits = [commit(f"{i:040d}", "2026-10-13T08:50:00Z", f"c{i}") for i in range(30)]
+    reg, _ = registry({**ROUTES, "/commits": commits})
+    out = json.loads((await reg.run("recent_changes", changes_args()))[0])
+    assert out["more_commits"] is True
+    out = json.loads((await registry(ROUTES)[0].run("recent_changes", changes_args()))[0])
+    assert out["more_commits"] is False
 
 
 async def test_no_token_sends_no_auth_header():
@@ -146,6 +156,7 @@ async def test_get_diff_compares_two_refs():
         ("get_diff", {"ref": "abc", "base": "x y"}, "invalid base"),
         ("recent_changes", changes_args(path="../etc"), "invalid path"),
         ("recent_changes", changes_args(end="yesterday"), "not an ISO-8601"),
+        ("recent_changes", changes_args(window_minutes="abc"), "must be an integer"),
     ],
 )
 async def test_bad_input_is_reported_without_calling_github(tool, tool_args, message):
