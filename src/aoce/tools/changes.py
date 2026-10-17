@@ -17,8 +17,10 @@ from aoce.tools import Tool, ToolError
 
 API_URL = "https://api.github.com"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
-# A sha, branch or tag. No "..", "//" or leading/trailing "/", so a ref cannot change the API route.
-REF_RE = re.compile(r"^(?!/)(?!.*//)(?!.*/$)(?!.*\.\.)[A-Za-z0-9_.\-/]{1,200}$")
+# A sha, branch or tag, as git allows them: "/"-separated segments that start with a letter, digit or
+# "_" and do not end in ".", and no "..". So a ref cannot change the API route or the compare range.
+REF_SEGMENT = r"[A-Za-z0-9_][A-Za-z0-9_.\-]*(?<!\.)"
+REF_RE = re.compile(rf"^(?=.{{1,200}}$)(?!.*\.\.){REF_SEGMENT}(?:/{REF_SEGMENT})*$")
 PATH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9_.\-/]{1,300}$")
 
 MAX_CHANGES = 30
