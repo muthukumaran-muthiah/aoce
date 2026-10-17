@@ -123,6 +123,8 @@ AGENT_SETTINGS = {
     'AOCE_JAEGER_URL': 'http://jaeger.otel-demo:16686',
     # Demo-only monitoring role from the OTel Demo's init.sql (pg_monitor, read-only use).
     'AOCE_DATABASE_URL': 'postgresql://monitoring_user:monitoring_password@astronomy-db.otel-demo:5432/astronomy_db',
+    # Change history for recent_changes / get_diff (AOCE-28). Public repo, so no token is needed.
+    'AOCE_GITHUB_REPO': 'muthukumaran-muthiah/aoce',
 }
 
 def agent_manifests():

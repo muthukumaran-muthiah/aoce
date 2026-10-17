@@ -64,7 +64,15 @@ class ToolRegistry:
 
 
 def build_registry(settings) -> ToolRegistry:
+    from aoce.tools.changes import get_diff_tool, recent_changes_tool
     from aoce.tools.db import db_diagnostics_tool
     from aoce.tools.metrics import query_metrics_tool
 
-    return ToolRegistry([query_metrics_tool(settings), db_diagnostics_tool(settings)])
+    return ToolRegistry(
+        [
+            query_metrics_tool(settings),
+            db_diagnostics_tool(settings),
+            recent_changes_tool(settings),
+            get_diff_tool(settings),
+        ]
+    )

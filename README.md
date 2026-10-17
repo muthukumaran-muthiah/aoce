@@ -77,7 +77,8 @@ src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
 src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
-src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres)
+src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres),
+                     recent_changes and get_diff (GitHub)
 ```
 
 ### Alerts to the agent (AOCE-21)
@@ -117,5 +118,7 @@ curl -s localhost:8000/tools/query_metrics -H "Authorization: Bearer $AOCE_API_K
   -d '{"signal":"latency_p95","service":null,"promql":null,"window_minutes":15,"end":null}'
 curl -s localhost:8000/tools/db_diagnostics -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"check":"blocking","limit":10}'
+curl -s localhost:8000/tools/recent_changes -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
+  -d '{"window_minutes":60,"end":null,"path":null}'
 ```
 Tests run in CI (`.github/workflows/ci.yml`). Locally, in Docker: `docker run --rm -v "$PWD":/app -w /app python:3.12-slim sh -c 'pip install -q -e ".[dev]" && pytest -q'`
