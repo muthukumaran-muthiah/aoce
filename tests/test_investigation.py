@@ -228,10 +228,9 @@ async def test_only_transient_api_errors_are_retryable(status, retryable):
     assert result.status == "failed" and result.retryable is retryable
 
 
-@pytest.mark.parametrize("stop_reason", ["max_tokens", "model_context_window_exceeded"])
-async def test_a_truncated_finish_is_retried_not_stored(stop_reason):
+async def test_a_truncated_finish_is_retried_not_stored():
     partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
-    llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason=stop_reason), response(tool_use(FINISH, REPORT, id="t2")))
+    llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="max_tokens"), response(tool_use(FINISH, REPORT, id="t2")))
     result = await Investigator(llm, registry(), settings()).investigate(ALERT)
     assert result.status == "concluded" and result.report == REPORT
     retry = llm.calls[1]
@@ -257,7 +256,7 @@ async def test_repeated_truncation_ends_from_the_trace():
     )
     result = await Investigator(llm, registry(), settings()).investigate(ALERT)
     assert result.status == "inconclusive" and result.stop_reason == "truncated"
-    assert result.report["fallback"] and "cut off at the output limit" in result.report["summary"]
+    assert result.report["fallback"] and "cut off at the output or context limit" in result.report["summary"]
     assert result.report["hypotheses"][0]["evidence"] == ['echo {"x": "a"}']
 
 
@@ -310,3 +309,11 @@ async def test_pause_turn_still_respects_the_budget():
     wrap = llm.calls[1][-1]
     assert wrap["role"] == "user" and "token_budget" in wrap["content"][0]["text"]
     assert result.stop_reason == "finished"
+
+
+async def test_a_full_context_window_ends_without_a_retry():
+    partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
+    llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="model_context_window_exceeded"))
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert len(llm.calls) == 1
+    assert result.stop_reason == "truncated" and result.report["fallback"]

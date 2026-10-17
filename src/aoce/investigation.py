@@ -28,8 +28,9 @@ MAX_TOOL_RESULT_CHARS = 20_000
 SOFT_DEADLINE_FRACTION = 0.8
 # Stop reasons that mean the turn was cut off: a tool call in it may be incomplete (AOCE-68).
 TRUNCATED_STOP_REASONS = {"max_tokens", "model_context_window_exceeded"}
-# Consecutive cut-off turns allowed before the investigation ends from the trace.
-MAX_TRUNCATED_TURNS = 2
+# A cut-off at max_tokens is retried this many times in a row before the investigation ends from the
+# trace. A full context window is not retried: the same history would be cut off again.
+MAX_TRUNCATION_RETRIES = 1
 
 SYSTEM_PROMPT = """\
 You are AOCE, an on-call engineer investigating a production alert in a microservices system: the \
@@ -218,7 +219,7 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     if reason == "no_report":
         opening = "Claude stopped without reporting, even after a reminder. "
     elif reason == "truncated":
-        opening = "Claude's replies were cut off at the output limit, so no report was received. "
+        opening = "Claude's reply was cut off at the output or context limit, so no report was received. "
     else:
         opening = f"The investigation reached its {_LIMIT_LABELS.get(reason, 'run')} limit before Claude reported. "
     summary = opening + (
@@ -300,7 +301,7 @@ class Investigator:
                 # A cut-off turn's last tool call may be partial, so it is never run or stored as the
                 # report. The turn is dropped and the model asked to retry, more briefly (AOCE-68).
                 truncated += 1
-                if truncated >= MAX_TRUNCATED_TURNS:
+                if truncated > MAX_TRUNCATION_RETRIES or response.stop_reason == "model_context_window_exceeded":
                     state.stop_reason = "truncated"
                     state.report = fallback_report(state, self.tools, "truncated")
                     return
@@ -318,8 +319,10 @@ class Investigator:
             messages.append({"role": "assistant", "content": response.content})
             if response.stop_reason == "pause_turn":
                 # The API paused a long turn; sending it back lets the model resume. Limits still apply.
-                if wrap_up is None and (wrap_up := self._limit_reached(state, soft_deadline)) is not None:
-                    messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
+                if wrap_up is None:
+                    wrap_up = self._limit_reached(state, soft_deadline)
+                    if wrap_up is not None:
+                        messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
                 continue
 
             calls = [b for b in response.content if b.type == "tool_use"]
