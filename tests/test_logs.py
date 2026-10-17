@@ -6,7 +6,7 @@ import pytest
 
 from aoce.config import Settings
 from aoce.tools import ToolRegistry, build_registry
-from aoce.tools.logs import BODY_CHARS, MAX_ATTRIBUTES, build_query, redact_log_text, search_logs_tool
+from aoce.tools.logs import BODY_CHARS, MAX_ATTRIBUTES, build_query, is_sensitive_key, redact_log_text, search_logs_tool
 
 END = datetime(2026, 10, 13, 9, 0, tzinfo=UTC)
 
@@ -202,6 +202,8 @@ def test_definition_is_strict_and_registered():
         ("env DB_PASSWORD=s3cr3t missing", "s3cr3t"),
         ("oauth client_secret: cs-abc rejected", "cs-abc"),
         ("header x_api_key=xk-777 invalid", "xk-777"),
+        ('login password="my secret phrase" rejected', "secret phrase"),
+        ("password: 'hunter 2' rejected", "hunter 2"),
     ],
 )
 def test_secrets_are_redacted_from_log_text(text, leaked):
@@ -258,3 +260,23 @@ async def test_invalid_json_body_is_a_tool_error(content):
     registry, _ = registry_with(lambda r: httpx.Response(200, content=content, headers={"content-type": "application/json"}))
     content, is_error = await registry.run("search_logs", args())
     assert is_error and "OpenSearch error (200)" in content
+
+
+@pytest.mark.parametrize(
+    "key, sensitive",
+    [
+        ("http.request.header.authorization", True), ("user.email", True), ("userEmail", True),
+        ("access_token", True), ("x-api-key", True), ("apiKey", True), ("db.password", True),
+        ("app.card.number", True), ("author", False), ("oauth.provider", False), ("cardinality", False),
+        ("session.id", False), ("llm.tokens", False), ("order.id", False),
+    ],
+)
+def test_sensitive_keys_are_matched_by_segment(key, sensitive):
+    assert is_sensitive_key(key) is sensitive
+
+
+async def test_opensearch_error_text_is_redacted():
+    error = {"error": {"root_cause": [{"reason": "failed to parse value [bob@example.com]"}]}}
+    registry, _ = registry_with(lambda r: httpx.Response(400, json=error))
+    content, is_error = await registry.run("search_logs", args())
+    assert is_error and "bob@example.com" not in content and "[redacted]" in content

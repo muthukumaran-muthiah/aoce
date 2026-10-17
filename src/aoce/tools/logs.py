@@ -50,13 +50,23 @@ SEVERITY_TEXTS = {
 LEVELS = list(SEVERITY_NUMBERS)
 
 MASK = "[redacted]"
-SENSITIVE_KEY = re.compile(r"auth|token|passw|secret|cookie|session|api[_.-]?key|credential|email|card|cvv", re.I)
+# Matched per key segment (split on . _ - and camelCase), so author, oauth.provider or cardinality stay.
+SENSITIVE_SEGMENTS = {
+    "auth", "authorization", "token", "password", "passwd", "pwd", "secret", "cookie", "credential",
+    "credentials", "email", "card", "cvv", "jwt",
+}
+SENSITIVE_COMPOUNDS = ("apikey", "accesskey", "privatekey", "accesstoken", "refreshtoken")
+_KEY_SEGMENT = re.compile(r"[._\-]+|(?<=[a-z0-9])(?=[A-Z])")
 _SECRETS = [
     (re.compile(r"\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.I), r"\1 " + MASK),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), MASK),
     (
-        re.compile(r"\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\w.-]*[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+", re.I),
+        re.compile(
+            r"""\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\w.-]*["']?\s*[=:]\s*)"""
+            r"""(?:"[^"]*"|'[^']*'|[^\s"',;&]+)""",
+            re.I,
+        ),
         r"\1" + MASK,
     ),
 ]
@@ -157,6 +167,12 @@ def _pattern(body: str) -> str:
     return " ".join(_VARIABLE.sub("#", body).split())[:BODY_CHARS]
 
 
+def is_sensitive_key(key: str) -> bool:
+    segments = [seg.lower() for seg in _KEY_SEGMENT.split(key) if seg]
+    joined = "".join(segments)
+    return any(seg in SENSITIVE_SEGMENTS for seg in segments) or any(c in joined for c in SENSITIVE_COMPOUNDS)
+
+
 def redact_log_text(text: str) -> str:
     for pattern, replacement in _SECRETS:
         text = pattern.sub(replacement, text)
@@ -186,7 +202,7 @@ def _record(hit: dict[str, Any]) -> dict[str, Any]:
         "trace_id": src.get("traceId") or None,
         "span_id": src.get("spanId") or None,
         "attributes": {
-            k: MASK if SENSITIVE_KEY.search(k) else _cut(v, ATTRIBUTE_CHARS)
+            k: MASK if is_sensitive_key(k) else _cut(v, ATTRIBUTE_CHARS)
             for k, v in list(attributes.items())[:MAX_ATTRIBUTES]
         },
     }
@@ -229,7 +245,8 @@ def search_logs_tool(settings, transport: httpx.AsyncBaseTransport | None = None
             error = body.get("error", resp.text[:300])
             if isinstance(error, dict):
                 error = (error.get("root_cause") or [{}])[0].get("reason") or error.get("reason") or error
-            raise ToolError(f"OpenSearch error ({resp.status_code}): {str(error)[:300]}")
+            # Parse errors can echo query or document values.
+            raise ToolError(f"OpenSearch error ({resp.status_code}): {redact_log_text(str(error))[:300]}")
 
         hits = body["hits"]["hits"]
         total = body["hits"].get("total", {})
