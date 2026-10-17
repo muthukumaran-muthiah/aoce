@@ -61,6 +61,10 @@ _SECRETS = [
     (re.compile(r"\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]+", re.I), r"\1 " + MASK),
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), MASK),
+    # Provider API keys: sk-/sk-ant- style, AWS access key ids, GitHub tokens.
+    (re.compile(r"\bsk-[A-Za-z0-9_-]{16,}"), MASK),
+    (re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b"), MASK),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}"), MASK),
     (
         re.compile(
             r"""\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\w.-]*["']?\s*[=:]\s*)"""
@@ -173,10 +177,27 @@ def is_sensitive_key(key: str) -> bool:
     return any(seg in SENSITIVE_SEGMENTS for seg in segments) or any(c in joined for c in SENSITIVE_COMPOUNDS)
 
 
+# 13-19 digits, optionally grouped by spaces or dashes; masked only if the Luhn check passes, so most
+# millisecond timestamps and ids stay readable.
+_CARD = re.compile(r"(?<![\w-])\d(?:[ -]?\d){12,18}(?![\w-])")
+
+
+def _luhn(digits: str) -> bool:
+    total = 0
+    for i, d in enumerate(reversed(digits)):
+        n = int(d) * (2 if i % 2 else 1)
+        total += n - 9 if n > 9 else n
+    return total % 10 == 0
+
+
+def _mask_card(m: re.Match) -> str:
+    return MASK if _luhn(re.sub(r"\D", "", m.group(0))) else m.group(0)
+
+
 def redact_log_text(text: str) -> str:
     for pattern, replacement in _SECRETS:
         text = pattern.sub(replacement, text)
-    return text
+    return _CARD.sub(_mask_card, text)
 
 
 def _cut(value: Any, n: int) -> Any:

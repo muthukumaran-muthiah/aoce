@@ -204,6 +204,11 @@ def test_definition_is_strict_and_registered():
         ("header x_api_key=xk-777 invalid", "xk-777"),
         ('login password="my secret phrase" rejected', "secret phrase"),
         ("password: 'hunter 2' rejected", "hunter 2"),
+        ("charge 4111 1111 1111 1111 declined", "4111 1111"),
+        ("card 5500-0000-0000-0004 declined", "5500-0000"),
+        ("key sk-ant-api03-abcdefghijklmnop123 rejected", "abcdefghijklmnop"),
+        ("aws AKIAIOSFODNN7EXAMPLE denied", "AKIAIOSFODNN7EXAMPLE"),
+        ("push with ghp_abcdefghijklmnopqrstuvwxyz0123456789 failed", "ghp_abcdef"),
     ],
 )
 def test_secrets_are_redacted_from_log_text(text, leaked):
@@ -280,3 +285,8 @@ async def test_opensearch_error_text_is_redacted():
     registry, _ = registry_with(lambda r: httpx.Response(400, json=error))
     content, is_error = await registry.run("search_logs", args())
     assert is_error and "bob@example.com" not in content and "[redacted]" in content
+
+
+def test_non_card_numbers_stay_readable():
+    text = "order 1729181234567 took 120 ms, trace 4bf92f3577b34da6a3ce929d0e0e4736"
+    assert redact_log_text(text) == text
