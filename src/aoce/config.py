@@ -46,7 +46,7 @@ class Settings(BaseSettings):
 
     # Change history (AOCE-23, AOCE-28)
     github_repo: str | None = None
-    github_token: str | None = None
+    github_token: SecretStr | None = None
 
 
 @lru_cache

@@ -131,7 +131,7 @@ class GitHub:
     def client(self) -> httpx.AsyncClient:
         headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
         if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
+            headers["Authorization"] = f"Bearer {self.token.get_secret_value()}"
         return httpx.AsyncClient(base_url=API_URL, headers=headers, timeout=15, transport=self.transport)
 
 
