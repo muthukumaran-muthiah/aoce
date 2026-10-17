@@ -17,8 +17,8 @@ from aoce.tools import Tool, ToolError
 
 API_URL = "https://api.github.com"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
-# A sha, branch or tag. No "..", so a ref cannot turn into a compare range or a path.
-REF_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9_.\-/]{1,200}$")
+# A sha, branch or tag. No "..", "//" or leading/trailing "/", so a ref cannot change the API route.
+REF_RE = re.compile(r"^(?!/)(?!.*//)(?!.*/$)(?!.*\.\.)[A-Za-z0-9_.\-/]{1,200}$")
 PATH_RE = re.compile(r"^(?!.*\.\.)[A-Za-z0-9_.\-/]{1,300}$")
 
 MAX_CHANGES = 30
@@ -54,7 +54,8 @@ RECENT_CHANGES_SCHEMA = {
 }
 
 GET_DIFF_DESCRIPTION = f"""\
-Show the diff of one commit (base null) or of everything between two refs (base..ref), trimmed for \
+Show the diff of one commit (base null) or of what ref adds since base (GitHub's base...ref compare, \
+from their merge base), trimmed for \
 reading: per changed file its status, line counts and patch, at most {MAX_FILES} files and \
 {PATCH_CHARS} characters of patch per file. Use it after recent_changes to check whether a suspicious \
 change could cause the symptom you see (a lowered timeout, a removed index, a changed flag default)."""
@@ -65,7 +66,7 @@ GET_DIFF_SCHEMA = {
         "ref": {"type": "string", "description": "Commit sha (full or short), branch or tag to inspect."},
         "base": {
             "type": ["string", "null"],
-            "description": "Compare base..ref instead, e.g. the previous release tag. Null for the single commit `ref`.",
+            "description": "Compare base...ref instead, e.g. the previous release tag. Null for the single commit `ref`.",
         },
     },
     "required": ["ref", "base"],
@@ -85,6 +86,11 @@ def _parse_end(end: str | None) -> datetime:
 
 def _parse_time(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value.replace("Z", "+00:00")) if value else None
+
+
+def _title(commit: dict[str, Any]) -> str:
+    """First line of a commit message; empty for an empty message."""
+    return ((commit.get("message") or "").splitlines() or [""])[0][:200]
 
 
 def _iso(dt: datetime) -> str:
@@ -170,7 +176,7 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
                     "kind": "commit",
                     "time": _iso(when) if when else None,
                     "sha": c["sha"][:12],
-                    "title": (commit.get("message") or "").splitlines()[0][:200] if commit.get("message") else "",
+                    "title": _title(commit),
                     "author": (c.get("author") or {}).get("login") or (commit.get("author") or {}).get("name"),
                     "url": c.get("html_url"),
                 }
@@ -186,7 +192,8 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
                         "title": f"deploy {d.get('ref')} to {d.get('environment')}"
                         + (f": {d['description']}" if d.get("description") else ""),
                         "author": (d.get("creator") or {}).get("login"),
-                        "url": d.get("url"),
+                        # Deployments have no html_url; link the repo's deployments page.
+                        "url": f"https://github.com/{repo}/deployments/{d.get('environment')}",
                     }
                 )
         for r in releases:
@@ -268,7 +275,7 @@ def get_diff_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -
                     "ref": ref,
                     "ahead_by": body.get("ahead_by"),
                     "commits": [
-                        {"sha": c["sha"][:12], "title": (c.get("commit", {}).get("message") or "").splitlines()[0][:200]}
+                        {"sha": c["sha"][:12], "title": _title(c.get("commit", {}))}
                         for c in commits[-MAX_FILES:]
                     ],
                 }

@@ -138,13 +138,13 @@ async def test_get_diff_of_one_commit_trims_patches():
 async def test_get_diff_compares_two_refs():
     routes = {"/compare/v1.3.0...v1.4.0": {
         "ahead_by": 2, "html_url": "https://github.com/acme/shop/compare/v1.3.0...v1.4.0",
-        "commits": [commit("a" * 40, "2026-10-13T08:50:00Z", "Lower timeout")],
+        "commits": [commit("b" * 40, "2026-10-13T08:40:00Z", ""), commit("a" * 40, "2026-10-13T08:50:00Z", "Lower timeout")],
         "files": [{"filename": "config.yaml", "status": "modified", "additions": 1, "deletions": 1,
                    "patch": "-timeout: 5s\n+timeout: 50ms"}],
     }}
     reg, _ = registry(routes)
     out = json.loads((await reg.run("get_diff", {"ref": "v1.4.0", "base": "v1.3.0"}))[0])
-    assert out["ahead_by"] == 2 and out["commits"][0]["title"] == "Lower timeout"
+    assert out["ahead_by"] == 2 and [c["title"] for c in out["commits"]] == ["", "Lower timeout"]
     assert out["files"][0]["patch"].endswith("+timeout: 50ms")
     assert out["files"][0]["patch_truncated"] is False
 
@@ -154,6 +154,9 @@ async def test_get_diff_compares_two_refs():
     [
         ("get_diff", {"ref": "main..evil", "base": None}, "invalid ref"),
         ("get_diff", {"ref": "abc", "base": "x y"}, "invalid base"),
+        ("get_diff", {"ref": "a//b", "base": None}, "invalid ref"),
+        ("get_diff", {"ref": "/x", "base": None}, "invalid ref"),
+        ("get_diff", {"ref": "main/", "base": None}, "invalid ref"),
         ("recent_changes", changes_args(path="../etc"), "invalid path"),
         ("recent_changes", changes_args(end="yesterday"), "not an ISO-8601"),
         ("recent_changes", changes_args(window_minutes="abc"), "must be an integer"),
