@@ -197,6 +197,11 @@ def test_definition_is_strict_and_registered():
         ("token eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJl rejected", "eyJzdWIiOiIxIn0"),
         ("retrying with password=hunter2&user=bob", "hunter2"),
         ('config {"api_key": "sk-123456"}', "sk-123456"),
+        ("refresh with access_token=at-998877 failed", "at-998877"),
+        ("auth_token: tk-5544 expired", "tk-5544"),
+        ("env DB_PASSWORD=s3cr3t missing", "s3cr3t"),
+        ("oauth client_secret: cs-abc rejected", "cs-abc"),
+        ("header x_api_key=xk-777 invalid", "xk-777"),
     ],
 )
 def test_secrets_are_redacted_from_log_text(text, leaked):
@@ -246,3 +251,10 @@ def test_patterns_collapse_uuids_whole():
     from aoce.tools.logs import _pattern
 
     assert _pattern("cart 123e4567-e89b-12d3-a456-426614174000 missing") == "cart # missing"
+
+
+@pytest.mark.parametrize("content", [b'{"hits": {"tot', b"[1, 2]"])
+async def test_invalid_json_body_is_a_tool_error(content):
+    registry, _ = registry_with(lambda r: httpx.Response(200, content=content, headers={"content-type": "application/json"}))
+    content, is_error = await registry.run("search_logs", args())
+    assert is_error and "OpenSearch error (200)" in content

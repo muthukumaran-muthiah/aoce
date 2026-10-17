@@ -4,7 +4,8 @@ The OTel Demo's collector exports every log record to OpenSearch (opensearch exp
 into daily indices otel-logs-yyyy-MM-dd. A record looks like
 {"@timestamp", "body", "severity": {"text", "number"}, "resource": {"service.name", ...},
  "attributes": {...}, "traceId", "spanId"}. The index has no template, so OpenSearch maps strings
-dynamically as text with a .keyword subfield.
+dynamically as text with a .keyword subfield; exact filters and aggregations use that subfield
+(SERVICE_KEY, SEVERITY_TEXT_KEY). An aggregation on the text field itself would fail the search.
 
 The tool only calls _search, with a hard cap on hits, body length and attributes, and a server-side
 timeout, so a broad query cannot flood the model's context or load the cluster.
@@ -34,7 +35,8 @@ SEARCH_TIMEOUT = "10s"
 # Exact counts beyond this cost a full scan of the matches; report a lower bound instead.
 TOTAL_HITS_CAP = 10_000
 
-SERVICE_FIELD = "resource.service.name"
+SERVICE_KEY = "resource.service.name.keyword"
+SEVERITY_TEXT_KEY = "severity.text.keyword"
 # OpenTelemetry severity numbers: the lowest number of each level (logs data model, SeverityNumber).
 SEVERITY_NUMBERS = {"debug": 5, "info": 9, "warn": 13, "error": 17, "fatal": 21}
 # Severity text for records that carry no number; matched on the keyword subfield, so list each case.
@@ -54,7 +56,7 @@ _SECRETS = [
     (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*"), MASK),
     (re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"), MASK),
     (
-        re.compile(r"\b((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+", re.I),
+        re.compile(r"\b([\w.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key)[\w.-]*[\"']?\s*[=:]\s*[\"']?)[^\s\"',;&]+", re.I),
         r"\1" + MASK,
     ),
 ]
@@ -101,11 +103,6 @@ INPUT_SCHEMA = {
 }
 
 
-def _either_field(field: str, clause: str, value: Any) -> dict[str, Any]:
-    """Match on field.keyword (dynamic mapping) or on field itself (an explicit keyword mapping)."""
-    return {"bool": {"should": [{clause: {f"{field}.keyword": value}}, {clause: {field: value}}], "minimum_should_match": 1}}
-
-
 def build_query(service: str | None, min_severity: str, text: str | None, start: str, end: str, limit: int) -> dict:
     texts = [t for level in LEVELS[LEVELS.index(min_severity):] for t in SEVERITY_TEXTS[level]]
     severity = {
@@ -116,7 +113,7 @@ def build_query(service: str | None, min_severity: str, text: str | None, start:
                 {
                     "bool": {
                         "must_not": {"exists": {"field": "severity.number"}},
-                        "filter": _either_field("severity.text", "terms", [v for t in texts for v in (t, t.lower(), t.capitalize())]),
+                        "filter": {"terms": {SEVERITY_TEXT_KEY: [v for t in texts for v in (t, t.lower(), t.capitalize())]}},
                     }
                 },
             ],
@@ -125,7 +122,7 @@ def build_query(service: str | None, min_severity: str, text: str | None, start:
     }
     filters: list[dict[str, Any]] = [{"range": {"@timestamp": {"gte": start, "lte": end}}}, severity]
     if service:
-        filters.append(_either_field(SERVICE_FIELD, "term", service))
+        filters.append({"term": {SERVICE_KEY: service}})
     if text:
         # No fuzzy or regex operators: they are costly on a wildcard index.
         filters.append(
@@ -147,8 +144,8 @@ def build_query(service: str | None, min_severity: str, text: str | None, start:
         "query": {"bool": {"filter": filters}},
         "_source": ["@timestamp", "body", "severity", "resource", "attributes", "traceId", "spanId"],
         "aggs": {
-            "by_service": {"terms": {"field": f"{SERVICE_FIELD}.keyword", "size": 10}},
-            "by_severity": {"terms": {"field": "severity.text.keyword", "size": 10}},
+            "by_service": {"terms": {"field": SERVICE_KEY, "size": 10}},
+            "by_severity": {"terms": {"field": SEVERITY_TEXT_KEY, "size": 10}},
         },
     }
 
@@ -222,7 +219,12 @@ def search_logs_tool(settings, transport: httpx.AsyncBaseTransport | None = None
         except httpx.HTTPError as e:
             # No URL in the message: it goes to the model and could carry credentials (user:pass@host).
             raise ToolError(f"OpenSearch unreachable: {type(e).__name__}") from e
-        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        try:
+            body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
         if resp.status_code != 200 or "hits" not in body:
             error = body.get("error", resp.text[:300])
             if isinstance(error, dict):
