@@ -41,7 +41,10 @@ class Settings(BaseSettings):
     prometheus_public_url: str = "http://localhost:9090"
     opensearch_url: str = "http://opensearch.otel-demo:9200"
     opensearch_logs_index: str = "otel-logs-*"
-    jaeger_url: str = "http://jaeger.otel-demo:16686"
+    # The demo serves Jaeger's UI and API under /jaeger/ui (jaeger_query base_path in the demo chart).
+    jaeger_url: str = "http://jaeger.otel-demo:16686/jaeger/ui"
+    # Where a human opens Jaeger (through the demo's frontend proxy); used for trace links.
+    jaeger_public_url: str = "http://localhost:8080/jaeger/ui"
 
     # Application database, read with a monitoring role (AOCE-57)
     database_url: str | None = None
