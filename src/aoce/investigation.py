@@ -317,12 +317,13 @@ class Investigator:
                 continue
             truncated = 0
             messages.append({"role": "assistant", "content": response.content})
-            if response.stop_reason == "pause_turn":
-                # The API paused a long turn; sending it back lets the model resume. Limits still apply.
-                if wrap_up is None:
-                    wrap_up = self._limit_reached(state, soft_deadline)
-                    if wrap_up is not None:
-                        messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
+            if response.stop_reason == "pause_turn" and wrap_up is None:
+                # The API paused a long turn; sending it back lets the model resume. Only server tools
+                # cause this and the agent has none, so it is defensive. Limits still apply, and a pause
+                # after the wrap-up falls through to the fallback below.
+                wrap_up = self._limit_reached(state, soft_deadline)
+                if wrap_up is not None:
+                    messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
                 continue
 
             calls = [b for b in response.content if b.type == "tool_use"]

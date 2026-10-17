@@ -316,6 +316,16 @@ async def test_pause_turn_still_respects_the_budget():
     assert result.stop_reason == "finished"
 
 
+async def test_a_pause_after_the_wrap_up_falls_back():
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500),
+        response(text("Checking..."), stop_reason="pause_turn"),
+    )
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    assert len(llm.calls) == 2
+    assert result.stop_reason == "token_budget" and result.report["fallback"]
+
+
 async def test_a_full_context_window_ends_without_a_retry():
     partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
     llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="model_context_window_exceeded"))
