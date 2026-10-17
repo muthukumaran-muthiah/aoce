@@ -23,7 +23,7 @@ import httpx
 from aoce.tools import Tool, ToolError
 from aoce.tools.db import _query_text
 from aoce.tools.logs import MASK, redact_log_text
-from aoce.tools.metrics import _parse_end
+from aoce.tools.metrics import SERVICE_RE, _parse_end
 
 MAX_TRACES = 20
 # Recent traces fetched to pick the slowest (or, as a fallback, the failing) ones from; Jaeger returns
@@ -32,7 +32,6 @@ SLOW_SAMPLE = 100
 TOP_SPANS = 5
 TOP_OPERATIONS = 10
 TEXT_CHARS = 200
-SERVICE_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
 
 # Span attributes worth showing; everything else is dropped.
 KEEP_TAGS = {
