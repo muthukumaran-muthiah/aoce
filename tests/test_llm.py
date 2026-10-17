@@ -89,6 +89,8 @@ async def test_real_client_can_be_closed():
         ("claude-haiku-5-5", True),
         ("claude-sonnet-5-5", True),
         ("claude-opus-4-5", True),
+        ("claude-opus-5", True),
+        ("claude-fable-5-1", True),
         ("claude-haiku-4-5", False),
         ("claude-sonnet-4-5", False),
         ("claude-opus-4-1", False),
@@ -102,3 +104,9 @@ async def test_effort_is_sent_only_to_models_that_accept_it(model, sends_effort)
     assert ("output_config" in messages.calls[0]) is sends_effort
     if sends_effort:
         assert messages.calls[0]["output_config"] == {"effort": "low"}
+
+
+def test_an_ignored_effort_setting_is_logged(caplog):
+    client, _ = fake_client(response())
+    LLMClient(Settings(model="claude-haiku-4-5", effort="max"), client=client)
+    assert "effort=max is not sent" in caplog.text

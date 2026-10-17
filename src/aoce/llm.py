@@ -1,10 +1,13 @@
 """Thin wrapper around the Anthropic Messages API used by the investigation loop (AOCE-29)."""
 
+import logging
 from typing import Any
 
 import anthropic
 
 from aoce.config import Settings
+
+log = logging.getLogger("aoce.llm")
 
 # Re-run a declined request on Anthropic's recommended fallback model instead of failing the investigation.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
@@ -26,6 +29,9 @@ class LLMClient:
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
         self.settings = settings
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._send_effort = settings.model.startswith(EFFORT_MODEL_PREFIXES)
+        if not self._send_effort:
+            log.warning("effort=%s is not sent: %s is not known to accept it", settings.effort, settings.model)
 
     async def aclose(self) -> None:
         """Close the HTTP connection pool."""
@@ -46,7 +52,7 @@ class LLMClient:
             # The system prompt and tool definitions repeat on every turn of an investigation.
             "cache_control": {"type": "ephemeral"},
         }
-        if self.settings.model.startswith(EFFORT_MODEL_PREFIXES):
+        if self._send_effort:
             params["output_config"] = {"effort": self.settings.effort}
         if self.settings.model.startswith(FALLBACK_MODEL_PREFIXES):
             params["betas"] = [FALLBACK_BETA]

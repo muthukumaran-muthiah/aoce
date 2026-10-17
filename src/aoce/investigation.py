@@ -327,14 +327,14 @@ class Investigator:
                 continue
 
             calls = [b for b in response.content if b.type == "tool_use"]
-            finish = next((b for b in calls if b.name == FINISH), None)
-            finish_error: str | None = None
-            if finish is not None:
+            finishes = [b for b in calls if b.name == FINISH]
+            finish_errors: dict[str, str] = {}
+            for finish in finishes:  # the first valid report wins
                 try:
                     report = FinishReport.model_validate(finish.input)
                 except ValidationError as e:
-                    finish_error = _validation_errors(e)
-                    log.warning("invalid %s input: %s", FINISH, finish_error)
+                    finish_errors[finish.id] = _validation_errors(e)
+                    log.warning("invalid %s input: %s", FINISH, finish_errors[finish.id])
                 else:
                     state.report = report.model_dump()
                     state.status = "concluded" if report.root_cause else "inconclusive"
@@ -360,18 +360,18 @@ class Investigator:
                 messages.append({"role": "user", "content": f"Report your findings by calling {FINISH}."})
                 continue
 
-            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls if c is not finish))
+            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls if c.name != FINISH))
             state.trace.extend(call for call, _ in results)
             content: list[dict[str, Any]] = [block for _, block in results]
-            if finish is not None:
-                content.append(
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": finish.id,
-                        "content": f"Report rejected, not stored: {finish_error}. Call {FINISH} again with a corrected report.",
-                        "is_error": True,
-                    }
-                )
+            content.extend(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"Report rejected, not stored: {error}. Call {FINISH} again with a corrected report.",
+                    "is_error": True,
+                }
+                for tool_use_id, error in finish_errors.items()
+            )
 
             wrap_up = self._limit_reached(state, soft_deadline)
             if wrap_up is not None:

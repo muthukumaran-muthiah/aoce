@@ -326,6 +326,24 @@ async def test_a_pause_after_the_wrap_up_falls_back():
     assert result.stop_reason == "token_budget" and result.report["fallback"]
 
 
+async def test_a_valid_second_report_in_the_same_turn_is_used():
+    calls = []
+    llm = FakeLLM(response(tool_use(FINISH, {"summary": "x"}, id="t1"), tool_use(FINISH, REPORT, id="t2")))
+    result = await Investigator(llm, registry(calls), settings()).investigate(ALERT)
+    assert result.status == "concluded" and result.report == REPORT
+
+
+async def test_extra_invalid_reports_are_never_run_as_tools():
+    llm = FakeLLM(
+        response(tool_use(FINISH, {"summary": "x"}, id="t1"), tool_use(FINISH, {"summary": "y"}, id="t2")),
+        response(tool_use(FINISH, REPORT, id="t3")),
+    )
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert result.trace == [] and result.report == REPORT
+    rejected = llm.calls[1][-1]["content"]
+    assert [b["tool_use_id"] for b in rejected] == ["t1", "t2"] and all(b["is_error"] for b in rejected)
+
+
 async def test_a_full_context_window_ends_without_a_retry():
     partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
     llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="model_context_window_exceeded"))
