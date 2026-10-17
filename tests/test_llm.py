@@ -95,6 +95,8 @@ async def test_real_client_can_be_closed():
         ("claude-sonnet-4-5", False),
         ("claude-opus-4-1", False),
         ("claude-opus-50", False),
+        ("claude-opus-4-5@20251101", True),
+        ("us.anthropic.claude-sonnet-4-6", True),
         ("claude-sonnet-4-0", False),
     ],
 )
@@ -111,3 +113,10 @@ def test_an_ignored_effort_setting_is_logged(caplog):
     client, _ = fake_client(response())
     LLMClient(Settings(model="claude-haiku-4-5", effort="max"), client=client)
     assert "effort=max is not sent" in caplog.text
+
+
+@pytest.mark.parametrize(("model", "send_effort"), [("claude-opus-9", True), ("claude-opus-5-5", False)])
+async def test_send_effort_overrides_the_model_check(model, send_effort):
+    client, messages = fake_client(response())
+    await LLMClient(Settings(model=model, send_effort=send_effort), client=client).create([{"role": "user", "content": "hi"}])
+    assert ("output_config" in messages.calls[0]) is send_effort
