@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 import httpx
 
 from aoce.tools import Tool, ToolError
-from aoce.tools.db import redact_query
+from aoce.tools.db import _query_text
 from aoce.tools.logs import MASK, redact_log_text
 from aoce.tools.metrics import _parse_end
 
@@ -116,8 +116,8 @@ _QUOTED = re.compile(r""""[^"]*"|'[^']*'|(?<==)\([^)]*\)""")
 
 
 def _scrub(value: Any) -> str:
-    """Truncate free text and mask secrets, e-mails, card numbers and quoted literals in it."""
-    return _QUOTED.sub(MASK, redact_log_text(_text(value)))
+    """Mask secrets, e-mails, card numbers and quoted literals in free text, then truncate it."""
+    return _text(_QUOTED.sub(MASK, redact_log_text(str(value))))
 
 
 def _tags(tags: list[dict[str, Any]]) -> dict[str, Any]:
@@ -133,7 +133,7 @@ def _kept_attributes(tags: dict[str, Any]) -> dict[str, Any]:
     for key in sorted(KEEP_TAGS & tags.keys()):
         value = tags[key]
         if key in SQL_TAGS:
-            value = redact_query(_text(value))
+            value = _query_text(str(value))
         elif isinstance(value, str):
             value = _scrub(value)
         kept[key] = value
@@ -262,11 +262,18 @@ async def _search(client: httpx.AsyncClient, url: str, params: dict[str, Any]) -
         resp = await client.get("/api/traces", params=params)
     except httpx.HTTPError as e:
         raise ToolError(f"Jaeger unreachable at {url}: {e}") from e
-    body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+    try:
+        body = resp.json()
+    except ValueError:
+        body = None
+    if not isinstance(body, dict):
+        body = {}
     if resp.status_code != 200:
         errors = body.get("errors") or [{"msg": resp.text[:300]}]
         raise ToolError(f"Jaeger error ({resp.status_code}): {errors[0].get('msg')}")
-    return body.get("data") or []
+    if "data" not in body:
+        raise ToolError(f"Jaeger returned an unexpected body: {resp.text[:300]}")
+    return body["data"] or []
 
 
 def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -> Tool:
@@ -278,11 +285,14 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
         if kind not in ("error", "slow"):
             raise ToolError(f"unknown kind: {kind!r}")
         operation = args.get("operation") or None
-        min_duration_ms = args.get("min_duration_ms")
+        try:
+            min_duration_ms = None if args.get("min_duration_ms") is None else int(args["min_duration_ms"])
+            limit = min(max(int(args.get("limit") or 5), 1), MAX_TRACES)
+            minutes = min(max(int(args.get("window_minutes") or 15), 1), 180)
+        except (TypeError, ValueError) as e:
+            raise ToolError(f"min_duration_ms, limit and window_minutes must be integers: {e}") from e
         if min_duration_ms is not None and min_duration_ms < 0:
             raise ToolError("min_duration_ms must be zero or more")
-        limit = min(max(int(args.get("limit") or 5), 1), MAX_TRACES)
-        minutes = min(max(int(args.get("window_minutes") or 15), 1), 180)
         end = _parse_end(args.get("end"))
         start = end - timedelta(minutes=minutes)
 
@@ -305,37 +315,41 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
                 tagged = {**params, "tags": json.dumps({"error": "true"}), "limit": limit}
                 queries.append(tagged)
                 traces = await _search(client, settings.jaeger_url, tagged)
+                scanned = len(traces)
                 if not traces:
                     # Not every Jaeger storage maps the OTel error status to the `error` tag; fall back to
                     # scanning recent traces for failed spans ourselves.
                     queries.append(sample)
                     traces = await _search(client, settings.jaeger_url, sample)
+                    scanned = len(traces)
                 traces = [t for t in traces if any(_is_error(_tags(s.get("tags"))) for s in t.get("spans") or [])]
             else:
                 queries.append(sample)
                 traces = await _search(client, settings.jaeger_url, sample)
+                scanned = len(traces)
 
         public = settings.jaeger_public_url
         summaries, rows = [], []
         for trace in traces:
             summary, trace_rows = summarise_trace(trace, f"{public}/trace/{trace.get('traceID')}")
-            summaries.append((summary, trace_rows))
+            start_us = min((sp["startTime"] for sp in trace.get("spans") or []), default=0)
+            summaries.append((summary, trace_rows, start_us))
         if kind == "slow":
             summaries.sort(key=lambda s: s[0]["duration_ms"], reverse=True)
         else:
-            summaries.sort(key=lambda s: s[0]["start"] or "", reverse=True)
+            summaries.sort(key=lambda s: s[2], reverse=True)
         summaries = summaries[:limit]
-        for _, trace_rows in summaries:
+        for _, trace_rows, _ in summaries:
             rows.extend(trace_rows)
 
-        search = {k: v for k, v in queries[0].items() if k != "lookback"}
-        search_url = f"{public}/search?" + urlencode(search)
+        # The UI reads start/end only with lookback=custom; show the number of traces asked for.
+        search_url = f"{public}/search?" + urlencode({**queries[0], "limit": limit})
         return {
             "service": service,
             "kind": kind,
             "window": {"start": start.isoformat(), "end": end.isoformat()},
-            "traces": [s for s, _ in summaries],
-            "traces_scanned": len(traces),
+            "traces": [s for s, _, _ in summaries],
+            "traces_scanned": scanned,
             "no_data": not summaries,
             "operations": rank_operations(rows),
             "evidence": {

@@ -120,7 +120,9 @@ async def test_slow_traces_are_sorted_and_self_time_points_at_the_database():
     assert int(params["end"]) == int(END.timestamp() * 1e6)
     assert int(params["start"]) == int((END - timedelta(minutes=15)).timestamp() * 1e6)
     assert "tags" not in params
-    assert out["evidence"]["search_url"].startswith("http://ui/jaeger/ui/search?")
+    search = httpx.URL(out["evidence"]["search_url"])
+    assert str(search).startswith("http://ui/jaeger/ui/search?")
+    assert search.params["lookback"] == "custom" and search.params["limit"] == "1"
 
 
 async def test_min_duration_and_operation_are_passed_to_jaeger():
@@ -172,6 +174,7 @@ async def test_error_search_falls_back_to_scanning_recent_traces():
 
     assert len(seen) == 2
     assert [t["trace_id"] for t in out["traces"]] == ["err1"]
+    assert out["traces_scanned"] == 2
     assert len(out["evidence"]["jaeger_queries"]) == 2
 
 
@@ -182,6 +185,7 @@ async def test_error_search_falls_back_to_scanning_recent_traces():
         ({"service": ""}, "invalid service name"),
         ({"min_duration_ms": -1}, "zero or more"),
         ({"end": "yesterday"}, "not an ISO-8601"),
+        ({"limit": "five"}, "must be integers"),
     ],
 )
 async def test_bad_input_is_reported_to_the_model(overrides, message):
@@ -197,6 +201,24 @@ async def test_jaeger_errors_are_tool_errors():
     )
     content, is_error = await registry.run("get_traces", args())
     assert is_error and "parameter 'service' is required" in content
+
+
+@pytest.mark.parametrize("body", ['{"data": [', "[]"])
+async def test_malformed_jaeger_bodies_are_tool_errors(body):
+    registry, _ = registry_with(
+        lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+    content, is_error = await registry.run("get_traces", args())
+    assert is_error and "unexpected body" in content
+
+
+async def test_error_traces_are_newest_first():
+    older, newer = checkout_trace("older", error=True), checkout_trace("newer", error=True)
+    for s in newer["spans"]:
+        s["startTime"] += 5_123_456
+    registry, _ = registry_with(lambda r: httpx.Response(200, json={"data": [older, newer]}))
+    out = json.loads((await registry.run("get_traces", args(kind="error")))[0])
+    assert [t["trace_id"] for t in out["traces"]] == ["newer", "older"]
 
 
 async def test_unreachable_jaeger_is_a_tool_error():
