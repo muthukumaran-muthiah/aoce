@@ -1,9 +1,11 @@
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
 
 from aoce.alerts import Alert
+from aoce.audit import AuditEntry, recording
 from aoce.config import Settings
 from aoce.investigation import FINISH, Investigator, tool_definitions
 from aoce.llm import LLMRefusalError
@@ -55,6 +57,9 @@ class FakeLLM:
         self.calls.append([dict(m) for m in messages])
         await asyncio.sleep(self.delay)
         return self.responses.pop(0)
+
+    async def aclose(self):
+        pass
 
 
 def registry(calls=None):
@@ -226,3 +231,60 @@ async def test_only_transient_api_errors_are_retryable(status, retryable):
 
     result = await Investigator(FailingLLM(), registry(), settings()).investigate(ALERT)
     assert result.status == "failed" and result.retryable is retryable
+
+
+# AOCE-40: audit log of tool calls
+
+
+def audit_lines(caplog) -> list[dict]:
+    return [json.loads(r.getMessage().removeprefix("tool call ")) for r in caplog.records if r.name == "aoce.audit"]
+
+
+async def test_a_call_outside_an_investigation_is_logged_as_an_operator_call(caplog):
+    caplog.set_level("INFO", logger="aoce.audit")
+    content, _ = await registry().run("echo", {"x": "hi"})
+    [line] = audit_lines(caplog)
+    assert line["actor"] == "operator" and line["incident_id"] is None
+    assert line["tool"] == "echo" and line["arguments"] == {"x": "hi"}
+    assert line["outcome"] == "ok" and line["result_chars"] == len(content)
+    assert line["duration_ms"] >= 0 and line["at"]
+
+
+async def test_every_investigation_call_is_appended_to_the_incident(caplog):
+    caplog.set_level("INFO", logger="aoce.audit")
+    llm = FakeLLM(
+        response(
+            tool_use("echo", {"x": "a", "hypothesis": "h1"}, id="t1"),
+            tool_use("echo", {"x": "boom", "hypothesis": "h2"}, id="t2"),
+            tool_use("nope", {"hypothesis": "h3"}, id="t3"),
+        ),
+        response(tool_use(FINISH, REPORT)),
+    )
+    entries: list[AuditEntry] = []
+    with recording("inc1", entries):
+        await Investigator(llm, registry(), settings()).investigate(ALERT)
+
+    assert {(e.tool, e.outcome) for e in entries} == {("echo", "ok"), ("echo", "error"), ("nope", "error")}
+    assert all(e.incident_id == "inc1" and e.actor == "agent" for e in entries)
+    assert {e.arguments.get("x") for e in entries} == {"a", "boom", None}
+    assert all("hypothesis" not in e.arguments for e in entries)
+    assert next(e for e in entries if e.outcome == "ok").result_chars == len('{"x": "a"}')
+    # Each entry is also a log line, so the record survives the in-memory store.
+    assert [line["tool"] for line in audit_lines(caplog)] == [e.tool for e in entries]
+
+
+async def test_a_call_cut_off_by_the_tool_timeout_is_recorded_as_cancelled():
+    llm = FakeLLM(response(tool_use("echo", {"x": "slow", "hypothesis": "h"})), response(tool_use(FINISH, REPORT)))
+    entries: list[AuditEntry] = []
+    with recording("inc1", entries):
+        await Investigator(llm, registry(), settings(tool_timeout_s=0.05)).investigate(ALERT)
+    [entry] = entries
+    assert entry.outcome == "cancelled" and entry.result_chars == 0 and entry.duration_ms >= 40
+
+
+async def test_recording_does_not_leak_past_its_block():
+    entries: list[AuditEntry] = []
+    with recording("inc1", entries):
+        await registry().run("echo", {"x": "in"})
+    await registry().run("echo", {"x": "out"})
+    assert [e.arguments["x"] for e in entries] == ["in"]

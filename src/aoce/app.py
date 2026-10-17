@@ -13,6 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, Response, status
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
+from aoce.audit import AuditEntry, recording
 from aoce.auth import require_api_key, require_webhook_token
 from aoce.config import get_settings
 from aoce.investigation import InvestigationResult, Investigator
@@ -37,6 +38,8 @@ class Incident(BaseModel):
     # Set on a transient API failure (overload, rate limit, network, 5xx) that a re-send should retry.
     retryable: bool = False
     attempts: int = 1
+    # Every tool call this incident's investigation made, in completion order, appended as they finish (AOCE-40).
+    audit: list[AuditEntry] = []
 
 
 class IncidentStore:
@@ -160,7 +163,8 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
         # Stays "queued" until a slot frees up.
         async with investigation_slots():
             incident.status = "investigating"
-            incident.investigation = await investigator.investigate(incident.alert)
+            with recording(incident.id, incident.audit):
+                incident.investigation = await investigator.investigate(incident.alert)
             incident.status = incident.investigation.status
             incident.retryable = incident.investigation.retryable
     except asyncio.CancelledError:

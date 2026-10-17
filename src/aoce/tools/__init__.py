@@ -7,9 +7,13 @@ handler. Handlers return plain dicts; every result carries the exact query that 
 
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
+
+from aoce import audit
 
 log = logging.getLogger("aoce.tools")
 
@@ -47,7 +51,19 @@ class ToolRegistry:
         return [t.definition() for t in self._tools.values()]
 
     async def run(self, name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
-        """Run a tool and return (content, is_error) ready for a tool_result block."""
+        """Run a tool and return (content, is_error) ready for a tool_result block.
+
+        Every call, including unknown tools and calls cancelled mid-run, gets an audit entry (AOCE-40).
+        """
+        at, started = datetime.now(UTC), time.monotonic()
+        content, is_error = None, True
+        try:
+            content, is_error = await self._run(name, tool_input)
+            return content, is_error
+        finally:
+            audit.record(name, tool_input, at, time.monotonic() - started, content, is_error)
+
+    async def _run(self, name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
         tool = self._tools.get(name)
         if tool is None:
             return f"unknown tool: {name}", True
