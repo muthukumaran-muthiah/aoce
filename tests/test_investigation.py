@@ -42,9 +42,9 @@ def text(t):
     return SimpleNamespace(type="text", text=t)
 
 
-def response(*blocks, tokens=100):
+def response(*blocks, tokens=100, stop_reason="end_turn"):
     usage = SimpleNamespace(input_tokens=tokens, output_tokens=0, cache_creation_input_tokens=0, cache_read_input_tokens=0)
-    return SimpleNamespace(content=list(blocks), usage=usage, stop_reason="end_turn")
+    return SimpleNamespace(content=list(blocks), usage=usage, stop_reason=stop_reason)
 
 
 class FakeLLM:
@@ -231,6 +231,97 @@ async def test_only_transient_api_errors_are_retryable(status, retryable):
 
     result = await Investigator(FailingLLM(), registry(), settings()).investigate(ALERT)
     assert result.status == "failed" and result.retryable is retryable
+
+
+async def test_a_truncated_finish_is_retried_not_stored():
+    partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
+    llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="max_tokens"), response(tool_use(FINISH, REPORT, id="t2")))
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert result.status == "concluded" and result.report == REPORT
+    retry = llm.calls[1]
+    assert all(m["role"] != "assistant" for m in retry)  # the cut-off turn was dropped
+    assert "output limit" in retry[-1]["content"]
+
+
+async def test_a_truncated_tool_call_is_not_run():
+    calls = []
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a"}), stop_reason="max_tokens"),
+        response(tool_use(FINISH, REPORT, id="t2")),
+    )
+    result = await Investigator(llm, registry(calls), settings()).investigate(ALERT)
+    assert calls == [] and result.trace == [] and result.stop_reason == "finished"
+
+
+async def test_repeated_truncation_ends_from_the_trace():
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"})),
+        response(tool_use(FINISH, {"summary": "x"}), stop_reason="max_tokens"),
+        response(tool_use(FINISH, {"summary": "x"}), stop_reason="max_tokens"),
+    )
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert result.status == "inconclusive" and result.stop_reason == "truncated"
+    assert result.report["fallback"] and "cut off at the output or context limit" in result.report["summary"]
+    assert result.report["hypotheses"][0]["evidence"] == ['echo {"x": "a"}']
+
+
+async def test_pause_turn_is_resumed():
+    llm = FakeLLM(response(text("Checking..."), stop_reason="pause_turn"), response(tool_use(FINISH, REPORT)))
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert result.stop_reason == "finished"
+    assert llm.calls[1][-1]["role"] == "assistant"  # sent back as-is so the model continues
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {k: v for k, v in REPORT.items() if k != "checked"},
+        {**REPORT, "confidence": "certain"},
+        {**REPORT, "summary": ""},
+        {**REPORT, "hypotheses": [{"statement": "DB lock", "status": "confirmed"}]},
+        {**REPORT, "extra": 1},
+    ],
+)
+async def test_an_invalid_report_is_rejected_and_the_model_retries(bad):
+    calls = []
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"}, id="t0"), tool_use(FINISH, bad, id="t1")),
+        response(tool_use(FINISH, REPORT, id="t2")),
+    )
+    result = await Investigator(llm, registry(calls), settings()).investigate(ALERT)
+    assert result.status == "concluded" and result.report == REPORT
+    assert calls == [{"x": "a"}]  # the other call in that turn still ran
+    results = {b["tool_use_id"]: b for b in llm.calls[1][-1]["content"]}
+    assert results["t1"]["is_error"] and "Report rejected" in results["t1"]["content"]
+    assert not results["t0"]["is_error"]
+
+
+async def test_an_invalid_report_after_the_wrap_up_falls_back():
+    llm = FakeLLM(
+        response(tool_use("echo", {"x": "a", "hypothesis": "h"}), tokens=500),
+        response(tool_use(FINISH, {"summary": "DB"})),
+    )
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    assert result.stop_reason == "token_budget" and result.report["fallback"]
+
+
+async def test_pause_turn_still_respects_the_budget():
+    llm = FakeLLM(
+        response(text("Checking..."), stop_reason="pause_turn", tokens=500),
+        response(tool_use(FINISH, {**REPORT, "root_cause": None, "confidence": "low"})),
+    )
+    result = await Investigator(llm, registry(), settings(investigation_token_budget=400)).investigate(ALERT)
+    wrap = llm.calls[1][-1]
+    assert wrap["role"] == "user" and "token_budget" in wrap["content"][0]["text"]
+    assert result.stop_reason == "finished"
+
+
+async def test_a_full_context_window_ends_without_a_retry():
+    partial = {"summary": "product-catalog is blocked", "root_cause": "A long trans"}
+    llm = FakeLLM(response(tool_use(FINISH, partial), stop_reason="model_context_window_exceeded"))
+    result = await Investigator(llm, registry(), settings()).investigate(ALERT)
+    assert len(llm.calls) == 1
+    assert result.stop_reason == "truncated" and result.report["fallback"]
 
 
 # AOCE-40: audit log of tool calls

@@ -81,3 +81,24 @@ async def test_real_client_can_be_closed():
     llm = LLMClient(Settings(anthropic_api_key="k"))
     await llm.aclose()
     assert llm._client.is_closed()
+
+
+@pytest.mark.parametrize(
+    ("model", "sends_effort"),
+    [
+        ("claude-haiku-5-5", True),
+        ("claude-sonnet-5-5", True),
+        ("claude-opus-4-5", True),
+        ("claude-haiku-4-5", False),
+        ("claude-sonnet-4-5", False),
+        ("claude-opus-4-1", False),
+        ("claude-sonnet-4-0", False),
+    ],
+)
+async def test_effort_is_sent_only_to_models_that_accept_it(model, sends_effort):
+    client, messages = fake_client(response())
+    await LLMClient(Settings(model=model, effort="low"), client=client).create([{"role": "user", "content": "hi"}])
+
+    assert ("output_config" in messages.calls[0]) is sends_effort
+    if sends_effort:
+        assert messages.calls[0]["output_config"] == {"effort": "low"}

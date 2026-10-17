@@ -10,6 +10,12 @@ from aoce.config import Settings
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Models that support the server-side fallback. Haiku does not, so other models get no fallback parameter.
 FALLBACK_MODEL_PREFIXES = ("claude-opus-", "claude-sonnet-", "claude-fable-")
+# Models known to accept output_config.effort (AOCE-68); others (Haiku 4.5, Sonnet 4.5, Opus 4.1 and
+# older) reject it with a 400, so it is only sent to these.
+EFFORT_MODEL_PREFIXES = (
+    "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+    "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5", "claude-fable-", "claude-mythos-",
+)
 
 
 class LLMRefusalError(RuntimeError):
@@ -37,10 +43,11 @@ class LLMClient:
             "model": self.settings.model,
             "max_tokens": self.settings.max_tokens,
             "messages": messages,
-            "output_config": {"effort": self.settings.effort},
             # The system prompt and tool definitions repeat on every turn of an investigation.
             "cache_control": {"type": "ephemeral"},
         }
+        if self.settings.model.startswith(EFFORT_MODEL_PREFIXES):
+            params["output_config"] = {"effort": self.settings.effort}
         if self.settings.model.startswith(FALLBACK_MODEL_PREFIXES):
             params["betas"] = [FALLBACK_BETA]
             params["fallbacks"] = "default"
