@@ -216,3 +216,19 @@ def test_definition_is_strict_and_registered():
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
     assert "get_traces" in build_registry(Settings()).names()
+
+
+async def test_free_text_in_errors_is_scrubbed():
+    trace = checkout_trace("err1", error=True)
+    db = trace["spans"][2]
+    (status,) = [t for t in db["tags"] if t["key"] == "otel.status_description"]
+    status["value"] = 'invalid input syntax for type uuid: "a1b2"'
+    db["logs"][0]["fields"][2]["value"] = "duplicate key violates unique constraint: Key (email)=(jane@example.com)"
+    registry, _ = registry_with(lambda r: httpx.Response(200, json={"data": [trace]}))
+
+    out = json.loads((await registry.run("get_traces", args(kind="error")))[0])
+
+    (failed,) = out["traces"][0]["error_spans"]
+    assert failed["exception"]["message"] == "duplicate key violates unique constraint: Key (email)=[redacted]"
+    assert failed["attributes"]["otel.status_description"] == "invalid input syntax for type uuid: [redacted]"
+    assert "jane@example.com" not in json.dumps(out) and "a1b2" not in json.dumps(out)

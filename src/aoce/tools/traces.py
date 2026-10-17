@@ -6,7 +6,8 @@ reduced to its root, its failing spans and the spans with the most self time (ti
 on a child), and the operations that fail or eat time are also ranked across all returned traces.
 
 Span attributes can hold user data (SQL literals, URLs with query strings, exception messages), so
-only a short allow-list of attributes is kept, SQL goes through redact_query (AOCE-39), and every
+only a short allow-list of attributes is kept, SQL goes through redact_query (AOCE-39), other text
+(status descriptions, exception messages) has secrets, e-mails and quoted values masked, and every
 string is truncated.
 """
 
@@ -21,6 +22,7 @@ import httpx
 
 from aoce.tools import Tool, ToolError
 from aoce.tools.db import redact_query
+from aoce.tools.logs import MASK, redact_log_text
 from aoce.tools.metrics import _parse_end
 
 MAX_TRACES = 20
@@ -51,7 +53,6 @@ KEEP_TAGS = {
     "messaging.destination.name",
     "otel.status_description",
     "error.type",
-    "app.loadgenerator.user",
 }
 SQL_TAGS = {"db.statement", "db.query.text"}
 
@@ -109,6 +110,16 @@ def _text(value: Any) -> str:
     return s if len(s) <= TEXT_CHARS else s[:TEXT_CHARS] + "..."
 
 
+# Error text from drivers and frameworks quotes the offending value: `Key (email)=(jane@x.com)`,
+# `invalid input syntax for type uuid: "abc"`. Mask quoted and parenthesised values outright.
+_QUOTED = re.compile(r""""[^"]*"|'[^']*'|(?<==)\([^)]*\)""")
+
+
+def _scrub(value: Any) -> str:
+    """Truncate free text and mask secrets, e-mails, card numbers and quoted literals in it."""
+    return _QUOTED.sub(MASK, redact_log_text(_text(value)))
+
+
 def _tags(tags: list[dict[str, Any]]) -> dict[str, Any]:
     return {t["key"]: t.get("value") for t in tags or []}
 
@@ -124,7 +135,7 @@ def _kept_attributes(tags: dict[str, Any]) -> dict[str, Any]:
         if key in SQL_TAGS:
             value = redact_query(_text(value))
         elif isinstance(value, str):
-            value = _text(value)
+            value = _scrub(value)
         kept[key] = value
     return kept
 
@@ -136,7 +147,7 @@ def _exception(span: dict[str, Any]) -> dict[str, Any] | None:
         if fields.get("event") == "exception" or "exception.type" in fields:
             return {
                 "type": _text(fields.get("exception.type", "")),
-                "message": _text(fields.get("exception.message", "")),
+                "message": _scrub(fields.get("exception.message", "")),
             }
     return None
 
