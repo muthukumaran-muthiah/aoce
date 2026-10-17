@@ -203,7 +203,7 @@ async def test_jaeger_errors_are_tool_errors():
     assert is_error and "parameter 'service' is required" in content
 
 
-@pytest.mark.parametrize("body", ['{"data": [', "[]"])
+@pytest.mark.parametrize("body", ['{"data": [', "[]", "{}", '{"data": "x"}'])
 async def test_malformed_jaeger_bodies_are_tool_errors(body):
     registry, _ = registry_with(
         lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"})
@@ -219,6 +219,18 @@ async def test_error_traces_are_newest_first():
     registry, _ = registry_with(lambda r: httpx.Response(200, json={"data": [older, newer]}))
     out = json.loads((await registry.run("get_traces", args(kind="error")))[0])
     assert [t["trace_id"] for t in out["traces"]] == ["newer", "older"]
+
+
+async def test_odd_error_bodies_are_tool_errors_and_redacted():
+    registry, _ = registry_with(lambda r: httpx.Response(500, json={"errors": "boom for jane@example.com"}))
+    content, is_error = await registry.run("get_traces", args())
+    assert is_error and content.startswith("Jaeger error (500)") and "jane@example.com" not in content
+
+
+async def test_error_fallback_scans_a_wide_sample_even_with_min_duration():
+    registry, seen = registry_with(lambda r: httpx.Response(200, json={"data": []}))
+    await registry.run("get_traces", args(kind="error", min_duration_ms=500, limit=3))
+    assert [r.url.params["limit"] for r in seen] == ["3", str(SLOW_SAMPLE)]
 
 
 async def test_unreachable_jaeger_is_a_tool_error():

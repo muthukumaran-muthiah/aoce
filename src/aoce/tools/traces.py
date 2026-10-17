@@ -16,7 +16,7 @@ import re
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import httpx
 
@@ -173,6 +173,15 @@ def _parent_id(span: dict[str, Any]) -> str | None:
     return None
 
 
+def _start_us(trace: dict[str, Any]) -> int:
+    return min((s["startTime"] for s in trace.get("spans") or []), default=0)
+
+
+def _duration_us(trace: dict[str, Any]) -> int:
+    spans = trace.get("spans") or []
+    return max((s["startTime"] + s["duration"] for s in spans), default=0) - _start_us(trace)
+
+
 def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     """Return the trace summary and one row per span (service, operation, self_us, error) for ranking."""
     processes = trace.get("processes") or {}
@@ -269,11 +278,14 @@ async def _search(client: httpx.AsyncClient, params: dict[str, Any]) -> list[dic
         body = None
     if not isinstance(body, dict):
         body = {}
+    # Backend error text can echo query values; mask secrets and e-mails as search_logs does.
     if resp.status_code != 200:
-        errors = body.get("errors") or [{"msg": resp.text[:300]}]
-        raise ToolError(f"Jaeger error ({resp.status_code}): {errors[0].get('msg')}")
-    if "data" not in body:
-        raise ToolError(f"Jaeger returned an unexpected body: {resp.text[:300]}")
+        errors = body.get("errors")
+        first = errors[0] if isinstance(errors, list) and errors else None
+        message = first.get("msg") if isinstance(first, dict) else resp.text[:300]
+        raise ToolError(f"Jaeger error ({resp.status_code}): {redact_log_text(str(message))[:300]}")
+    if "data" not in body or not isinstance(body["data"], list | None):
+        raise ToolError(f"Jaeger returned an unexpected body: {redact_log_text(resp.text)[:300]}")
     return body["data"] or []
 
 
@@ -308,8 +320,10 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
         if min_duration_ms:
             params["minDuration"] = f"{min_duration_ms}ms"
         # Jaeger returns the most recent matches in no particular order. For the slowest traces without a
-        # duration floor, take a wider sample and keep the slowest.
+        # duration floor, take a wider sample and keep the slowest. The error fallback always scans the
+        # wide sample, since few of the recent traces may have failed.
         sample = {**params, "limit": limit if min_duration_ms else max(limit, SLOW_SAMPLE)}
+        wide_sample = {**params, "limit": max(limit, SLOW_SAMPLE)}
         queries = []
         async with httpx.AsyncClient(base_url=settings.jaeger_url, timeout=15, transport=transport) as client:
             if kind == "error":
@@ -320,8 +334,8 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
                 if not traces:
                     # Not every Jaeger storage maps the OTel error status to the `error` tag; fall back to
                     # scanning recent traces for failed spans ourselves.
-                    queries.append(sample)
-                    traces = await _search(client, sample)
+                    queries.append(wide_sample)
+                    traces = await _search(client, wide_sample)
                     scanned = len(traces)
                 traces = [t for t in traces if any(_is_error(_tags(s.get("tags"))) for s in t.get("spans") or [])]
             else:
@@ -329,18 +343,13 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
                 traces = await _search(client, sample)
                 scanned = len(traces)
 
+        # Pick the traces to keep from their span bounds first, so only `limit` traces are summarised.
+        traces.sort(key=_duration_us if kind == "slow" else _start_us, reverse=True)
         public = settings.jaeger_public_url
         summaries, rows = [], []
-        for trace in traces:
-            summary, trace_rows = summarise_trace(trace, f"{public}/trace/{trace.get('traceID')}")
-            start_us = min((sp["startTime"] for sp in trace.get("spans") or []), default=0)
-            summaries.append((summary, trace_rows, start_us))
-        if kind == "slow":
-            summaries.sort(key=lambda s: s[0]["duration_ms"], reverse=True)
-        else:
-            summaries.sort(key=lambda s: s[2], reverse=True)
-        summaries = summaries[:limit]
-        for _, trace_rows, _ in summaries:
+        for trace in traces[:limit]:
+            summary, trace_rows = summarise_trace(trace, f"{public}/trace/{quote(str(trace.get('traceID')), safe='')}")
+            summaries.append(summary)
             rows.extend(trace_rows)
 
         # The UI reads start/end only with lookback=custom; show the number of traces asked for.
@@ -349,7 +358,7 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
             "service": service,
             "kind": kind,
             "window": {"start": start.isoformat(), "end": end.isoformat()},
-            "traces": [s for s, _, _ in summaries],
+            "traces": summaries,
             "traces_scanned": scanned,
             "no_data": not summaries,
             "operations": rank_operations(rows),
