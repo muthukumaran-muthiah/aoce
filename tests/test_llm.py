@@ -96,6 +96,8 @@ async def test_real_client_can_be_closed():
         ("claude-opus-4-1", False),
         ("claude-opus-50", False),
         ("claude-opus-4-5@20251101", True),
+        ("claude-opus-4-5-20251101", True),
+        ("claude-haiku-4-5-20251001", False),
         ("us.anthropic.claude-sonnet-4-6", True),
         ("claude-sonnet-4-0", False),
     ],

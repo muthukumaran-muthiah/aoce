@@ -14,18 +14,25 @@ log = logging.getLogger("aoce.llm")
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Models that support the server-side fallback. Haiku does not, so other models get no fallback parameter.
 FALLBACK_MODEL_PREFIXES = ("claude-opus-", "claude-sonnet-", "claude-fable-")
-# Models known to accept output_config.effort (AOCE-68); others (Haiku 4.5, Sonnet 4.5, Opus 4.1 and
-# older) reject it with a 400, so it is only sent to these.
-EFFORT_MODEL_PREFIXES = (
-    "claude-opus-4-5", "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
-    "claude-sonnet-4-6", "claude-sonnet-5", "claude-haiku-5", "claude-fable-", "claude-mythos-",
+# Model families known to accept output_config.effort (AOCE-68); others (Haiku 4.5, Sonnet 4.5, Opus 4.1
+# and older) reject it with a 400, so it is only sent to these.
+EFFORT_MODEL_FAMILIES = (
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-haiku-5",
+    "claude-fable",
+    "claude-mythos",
 )
 
-# A prefix matches only up to "-", "@" or the end ("claude-opus-5" does not match "claude-opus-50"), and may
-# follow a provider prefix such as Bedrock's "us.anthropic.". AOCE_SEND_EFFORT overrides the check.
-_EFFORT_MODEL_RE = re.compile(
-    rf"(?:^|\.)(?:{'|'.join(re.escape(p.rstrip('-')) for p in EFFORT_MODEL_PREFIXES)})(?:[-@]|$)"
-)
+# A family matches when followed by "-", "@" or the end ("claude-opus-5" matches "claude-opus-5-5" but not
+# "claude-opus-50"), optionally after a provider prefix such as Bedrock's "us.anthropic.".
+# AOCE_SEND_EFFORT overrides the check.
+_EFFORT_MODEL_RE = re.compile(rf"(?:^|\.)(?:{'|'.join(map(re.escape, EFFORT_MODEL_FAMILIES))})(?:[-@]|$)")
 
 
 class LLMRefusalError(RuntimeError):
