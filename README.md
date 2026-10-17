@@ -72,13 +72,14 @@ Expected symptoms come from reading the demo's source; each entry is `verified: 
 ## Agent code
 ```
 src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
+src/aoce/audit.py    Audit log of every tool call (AOCE-40)
 src/aoce/auth.py     Bearer-token checks for /alerts, /incidents and /tools (AOCE-61)
 src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
 src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
 src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres),
-                     recent_changes and get_diff (GitHub)
+                     search_logs (OpenSearch), recent_changes and get_diff (GitHub)
 ```
 
 ### Alerts to the agent (AOCE-21)
@@ -106,7 +107,12 @@ tool calls (`"fallback": true`). At most 2 investigations run at once
 the webhook answers 503, so Alertmanager retries it with backoff. The last 200 incidents are kept in memory
 (`AOCE_MAX_INCIDENTS`). Follow it at
 `http://localhost:8000/incidents/<id>`: `status` goes `queued` → `investigating` → `concluded` /
-`inconclusive` / `failed`, and `investigation.trace` lists every tool call. Without `ANTHROPIC_API_KEY` incidents are
+`inconclusive` / `failed`, and `investigation.trace` lists every tool call with its hypothesis.
+`audit` is the incident's append-only audit log (AOCE-40): one entry per tool call as it finishes, with
+the time, tool, arguments, duration, outcome (`ok`, `error`, or `cancelled` when a timeout cut it off)
+and result size. Each entry, and each call made by hand through `POST /tools/{name}` (actor
+`operator`), is also logged as a JSON line on the `aoce.audit` logger; that log is the durable record,
+since incidents live only in memory. A retried incident keeps the entries of its failed attempts. Without `ANTHROPIC_API_KEY` incidents are
 marked `skipped`. Alertmanager re-sends of the same alert do not open a second incident, with two
 exceptions: an investigation that failed on a transient API error (429, 5xx, network) is retried up
 to 3 times, replacing the failed incident, and an alert whose incident has been dropped from memory
@@ -118,6 +124,8 @@ curl -s localhost:8000/tools/query_metrics -H "Authorization: Bearer $AOCE_API_K
   -d '{"signal":"latency_p95","service":null,"promql":null,"window_minutes":15,"end":null}'
 curl -s localhost:8000/tools/db_diagnostics -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"check":"blocking","limit":10}'
+curl -s localhost:8000/tools/search_logs -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
+  -d '{"service":null,"min_severity":"error","text":null,"window_minutes":15,"end":null,"limit":20}'
 curl -s localhost:8000/tools/recent_changes -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"window_minutes":60,"end":null,"path":null}'
 ```
