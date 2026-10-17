@@ -28,7 +28,7 @@ from aoce.tools.metrics import SERVICE_RE, _parse_end
 MAX_TRACES = 20
 # Recent traces fetched to pick the slowest (or, as a fallback, the failing) ones from; Jaeger returns
 # the most recent matches, not the slowest. Bounded so a search stays one modest response.
-SLOW_SAMPLE = 100
+SLOW_SAMPLE = 50
 TOP_SPANS = 5
 TOP_OPERATIONS = 10
 TEXT_CHARS = 200
