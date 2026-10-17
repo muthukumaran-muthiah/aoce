@@ -79,7 +79,7 @@ src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
 src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres),
-                     search_logs (OpenSearch)
+                     search_logs (OpenSearch), recent_changes and get_diff (GitHub)
 ```
 
 ### Alerts to the agent (AOCE-21)
@@ -126,5 +126,7 @@ curl -s localhost:8000/tools/db_diagnostics -H "Authorization: Bearer $AOCE_API_
   -d '{"check":"blocking","limit":10}'
 curl -s localhost:8000/tools/search_logs -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"service":null,"min_severity":"error","text":null,"window_minutes":15,"end":null,"limit":20}'
+curl -s localhost:8000/tools/recent_changes -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
+  -d '{"window_minutes":60,"end":null,"path":null}'
 ```
 Tests run in CI (`.github/workflows/ci.yml`). Locally, in Docker: `docker run --rm -v "$PWD":/app -w /app python:3.12-slim sh -c 'pip install -q -e ".[dev]" && pytest -q'`
