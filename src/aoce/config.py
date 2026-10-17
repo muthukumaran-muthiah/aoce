@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     model: str = "claude-haiku-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
+    # Whether to send `effort`. Unset: only to models known to accept it (AOCE-68); true or false forces it.
+    send_effort: bool | None = None
 
     # API authentication (AOCE-61). Alertmanager sends webhook_token as a bearer token on POST /alerts;
     # api_key guards /incidents and /tools. Leaving one unset turns its endpoints off.
