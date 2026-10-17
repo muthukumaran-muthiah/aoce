@@ -120,7 +120,8 @@ AGENT_SETTINGS = {
     'AOCE_PROMETHEUS_URL': 'http://prometheus.otel-demo:9090',
     'AOCE_PROMETHEUS_PUBLIC_URL': 'http://localhost:9090',
     'AOCE_OPENSEARCH_URL': 'http://opensearch.otel-demo:9200',
-    'AOCE_JAEGER_URL': 'http://jaeger.otel-demo:16686',
+    'AOCE_JAEGER_URL': 'http://jaeger.otel-demo:16686/jaeger/ui',
+    'AOCE_JAEGER_PUBLIC_URL': 'http://localhost:8080/jaeger/ui',
     # Demo-only monitoring role from the OTel Demo's init.sql (pg_monitor, read-only use).
     'AOCE_DATABASE_URL': 'postgresql://monitoring_user:monitoring_password@astronomy-db.otel-demo:5432/astronomy_db',
 }
