@@ -288,3 +288,11 @@ async def test_recording_does_not_leak_past_its_block():
         await registry().run("echo", {"x": "in"})
     await registry().run("echo", {"x": "out"})
     assert [e.arguments["x"] for e in entries] == ["in"]
+
+
+async def test_a_failing_audit_does_not_change_the_tool_result(monkeypatch):
+    def broken(*args, **kwargs):
+        raise ValueError("audit down")
+
+    monkeypatch.setattr("aoce.audit.record", broken)
+    assert await registry().run("echo", {"x": "hi"}) == ('{"x": "hi"}', False)

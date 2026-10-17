@@ -61,7 +61,11 @@ class ToolRegistry:
             content, is_error = await self._run(name, tool_input)
             return content, is_error
         finally:
-            audit.record(name, tool_input, at, time.monotonic() - started, content, is_error)
+            try:
+                audit.record(name, tool_input, at, time.monotonic() - started, content, is_error)
+            except Exception:
+                # Auditing must never change the outcome of the call it observes.
+                log.exception("auditing tool call %s failed", name)
 
     async def _run(self, name: str, tool_input: dict[str, Any]) -> tuple[str, bool]:
         tool = self._tools.get(name)
