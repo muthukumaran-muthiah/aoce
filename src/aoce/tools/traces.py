@@ -57,7 +57,7 @@ SQL_TAGS = {"db.statement", "db.query.text"}
 
 DESCRIPTION = """\
 Fetch recent traces for a service from Jaeger and summarise them. Use kind "error" for traces with a \
-failed span, or "slow" for the slowest traces (optionally only those longer than min_duration_ms). \
+failed span (the failure may be in a service it calls, which is often the root cause), or "slow" for the slowest traces (optionally only those longer than min_duration_ms). \
 For each trace you get its root operation, total duration, the services it crossed, its failing \
 spans (with status and exception message) and the spans with the most self time, i.e. time not \
 spent waiting on a child call, which is where the latency actually is. Across all traces, operations \
@@ -165,11 +165,16 @@ def _self_time(span: dict[str, Any], children: list[dict[str, Any]]) -> int:
     return max(span["duration"] - covered, 0)
 
 
-def _parent_id(span: dict[str, Any]) -> str | None:
-    for ref in span.get("references") or []:
-        if ref.get("refType") == "CHILD_OF":
-            return ref.get("spanID")
+def _parent_id(span: dict[str, Any], ref_types: tuple[str, ...] = ("CHILD_OF",)) -> str | None:
+    for ref_type in ref_types:
+        for ref in span.get("references") or []:
+            if ref.get("refType") == ref_type:
+                return ref.get("spanID")
     return None
+
+
+def _has_error(trace: dict[str, Any]) -> bool:
+    return any(_is_error(_tags(s.get("tags"))) for s in trace.get("spans") or [])
 
 
 def _start_us(trace: dict[str, Any]) -> int:
@@ -219,7 +224,9 @@ def summarise_trace(trace: dict[str, Any], trace_url: str) -> tuple[dict[str, An
                 entry["exception"] = exception
             errors.append((s["startTime"], entry))
 
-    roots = [s for s in spans if _parent_id(s) not in by_id] or spans
+    # A FOLLOWS_FROM span (async consumer) is not a root, but its caller does not wait on it, so it only
+    # counts as a parent here and not for self time.
+    roots = [s for s in spans if _parent_id(s, ("CHILD_OF", "FOLLOWS_FROM")) not in by_id] or spans
     root = min(roots, key=lambda s: s["startTime"]) if roots else None
     start = _start_us(trace)
     errors.sort(key=lambda e: e[0])
@@ -327,13 +334,14 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
                 queries.append(tagged)
                 traces = await _search(client, tagged)
                 scanned = len(traces)
+                traces = [t for t in traces if _has_error(t)]
                 if not traces:
                     # Not every Jaeger storage maps the OTel error status to the `error` tag; fall back to
                     # scanning recent traces for failed spans ourselves.
                     queries.append(sample)
                     traces = await _search(client, sample)
                     scanned = len(traces)
-                traces = [t for t in traces if any(_is_error(_tags(s.get("tags"))) for s in t.get("spans") or [])]
+                    traces = [t for t in traces if _has_error(t)]
             else:
                 queries.append(sample)
                 traces = await _search(client, sample)

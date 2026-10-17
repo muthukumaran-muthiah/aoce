@@ -277,3 +277,29 @@ async def test_operation_names_are_scrubbed():
 
     assert out["traces"][0]["root"]["operation"] == "GET /users/[redacted]"
     assert "jane@example.com" not in json.dumps(out)
+
+
+async def test_error_fallback_runs_when_tagged_traces_have_no_failed_span():
+    def respond(request):
+        if "tags" in request.url.params:
+            return httpx.Response(200, json={"data": [checkout_trace("ok")]})
+        return httpx.Response(200, json={"data": [checkout_trace("err1", error=True)]})
+
+    registry, seen = registry_with(respond)
+    out = json.loads((await registry.run("get_traces", args(kind="error")))[0])
+
+    assert len(seen) == 2
+    assert [t["trace_id"] for t in out["traces"]] == ["err1"]
+
+
+async def test_follows_from_span_is_not_a_root():
+    trace = checkout_trace("t1")
+    # The consumer's host clock runs a little behind, so it appears to start before the producer.
+    consumer = span("d", "kafka consume", "p2", -5, 50)
+    consumer["references"] = [{"refType": "FOLLOWS_FROM", "traceID": "t1", "spanID": "a"}]
+    trace["spans"].append(consumer)
+    registry, _ = registry_with(lambda r: httpx.Response(200, json={"data": [trace]}))
+
+    out = json.loads((await registry.run("get_traces", args()))[0])
+
+    assert out["traces"][0]["root"]["operation"] == "GET /api/products"
