@@ -1,0 +1,111 @@
+# Benchmark (AOCE-42): the 10 failure scenarios the agent is measured on (AOCE-43).
+#
+# Each entry says how to trigger the fault and how the agent gets paged. The expected root cause,
+# culprit, grading facts, red herrings and recommended fix are not repeated here: the runner reads
+# them from eval/failure_catalogue.yaml (AOCE-22) by `flag`, so the ground truth lives in one place.
+# Run it with `python eval/run_benchmark.py` (see eval/README.md).
+#
+# Fields
+#   flag            catalogue entry (tier: benchmark) and the flagd flag to switch on
+#   variant         flagd variant to set as defaultVariant (a key of the flag's `variants`)
+#   targeting       optional: replaces the flag's `targeting` while the scenario runs (restored after)
+#   trigger         how the agent is paged:
+#                     alert:     wait for Prometheus/Alertmanager to page it with the current rules;
+#                                `expect` lists the alerts the catalogue predicts (likely ones too)
+#                     synthetic: no current rule pages for this fault (catalogue `gap`), so after
+#                                `after_s` the runner posts the alert the missing rule would send.
+#                                Replace it with `alert` once that rule exists.
+#   page_timeout_s  give up waiting for the first page this long after the flag is switched on
+#   settle_s        after the first page, keep collecting further incidents this long
+#                   (one fault usually pages several services)
+
+defaults:
+  page_timeout_s: 600
+  settle_s: 120
+
+scenarios:
+  - flag: productCatalogLockContention
+    variant: "on"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighLatencyP95, service: product-catalog}
+
+  - flag: paymentFailure
+    variant: "50%"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighErrorRate, service: payment}
+        - {alertname: HighErrorRate, service: checkout}
+
+  - flag: paymentUnreachable
+    variant: "on"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighErrorRate, service: checkout}
+
+  - flag: productCatalogFailure
+    variant: "on"
+    # The shipped targeting returns "off" on both branches, so the default variant alone does nothing
+    # (see the catalogue note). Fail only product OLJCESPC7Z, as the demo intends.
+    targeting:
+      if:
+        - {"==": [{var: product_id}, OLJCESPC7Z]}
+        - "on"
+        - "off"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighErrorRate, service: product-catalog}
+        - {alertname: HighErrorRate, service: checkout}
+
+  - flag: adHighCpu
+    variant: "on"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighLatencyP95, service: ad}
+
+  - flag: emailMemoryLeak
+    variant: "100x"
+    trigger:
+      kind: synthetic
+      # Give the leak time to reach the 100Mi limit and restart the container at least once.
+      after_s: 600
+      alert:
+        labels: {alertname: ContainerRestarts, service_name: email, severity: warning}
+        annotations:
+          summary: email container restarted repeatedly in the last 15 minutes
+
+  - flag: recommendationCacheFailure
+    variant: "on"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighLatencyP95, service: recommendation}
+
+  - flag: kafkaQueueProblems
+    variant: "on"
+    trigger:
+      kind: synthetic
+      after_s: 300
+      alert:
+        labels: {alertname: KafkaConsumerLagHigh, service_name: fraud-detection, topic: orders, severity: warning}
+        annotations:
+          summary: consumer group lag on topic orders keeps growing
+
+  - flag: intlShippingSlowdown
+    variant: "10sec"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighLatencyP95, service: checkout}
+
+  - flag: loadGeneratorFloodHomepage
+    variant: "on"
+    trigger:
+      kind: alert
+      expect:
+        - {alertname: HighLatencyP95, service: frontend}
