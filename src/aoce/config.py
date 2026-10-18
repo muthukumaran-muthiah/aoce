@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     model: str = "claude-haiku-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
+    # Whether to send `effort`. Unset: only to models known to accept it (AOCE-68); true or false forces it.
+    send_effort: bool | None = None
 
     # API authentication (AOCE-61). Alertmanager sends webhook_token as a bearer token on POST /alerts;
     # api_key guards /incidents and /tools. Leaving one unset turns its endpoints off.
@@ -39,7 +41,10 @@ class Settings(BaseSettings):
     prometheus_public_url: str = "http://localhost:9090"
     opensearch_url: str = "http://opensearch.otel-demo:9200"
     opensearch_logs_index: str = "otel-logs-*"
-    jaeger_url: str = "http://jaeger.otel-demo:16686"
+    # The demo serves Jaeger's UI and API under /jaeger/ui (jaeger_query base_path in the demo chart).
+    jaeger_url: str = "http://jaeger.otel-demo:16686/jaeger/ui"
+    # Where a human opens Jaeger (through the demo's frontend proxy); used for trace links.
+    jaeger_public_url: str = "http://localhost:8080/jaeger/ui"
 
     # Application database, read with a monitoring role (AOCE-57)
     database_url: str | None = None

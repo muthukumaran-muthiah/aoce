@@ -14,7 +14,7 @@ import time
 from typing import Any, Literal
 
 import anthropic
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from aoce.alerts import Alert
 from aoce.config import Settings
@@ -26,6 +26,11 @@ log = logging.getLogger("aoce.investigation")
 FINISH = "finish_investigation"
 MAX_TOOL_RESULT_CHARS = 20_000
 SOFT_DEADLINE_FRACTION = 0.8
+# Stop reasons that mean the turn was cut off: a tool call in it may be incomplete (AOCE-68).
+TRUNCATED_STOP_REASONS = {"max_tokens", "model_context_window_exceeded"}
+# A cut-off at max_tokens is retried this many times in a row before the investigation ends from the
+# trace. A full context window is not retried: the same history would be cut off again.
+MAX_TRUNCATION_RETRIES = 1
 
 SYSTEM_PROMPT = """\
 You are AOCE, an on-call engineer investigating a production alert in a microservices system: the \
@@ -108,7 +113,33 @@ FINISH_TOOL = {
     },
 }
 
-StopReason = Literal["finished", "max_steps", "token_budget", "soft_timeout", "timeout", "no_report", "error"]
+StopReason = Literal[
+    "finished", "max_steps", "token_budget", "soft_timeout", "timeout", "no_report", "truncated", "error"
+]
+
+
+class _Hypothesis(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    statement: str
+    status: Literal["confirmed", "rejected", "inconclusive"]
+    evidence: list[str]
+
+
+class FinishReport(BaseModel):
+    """The finish_investigation input, checked before it is stored as the report (AOCE-68)."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+    summary: str = Field(min_length=1)
+    root_cause: str | None
+    confidence: Literal["low", "medium", "high"]
+    hypotheses: list[_Hypothesis]
+    recommended_action: str | None
+    checked: list[str]
+    not_checked: list[str]
+
+
+def _validation_errors(e: ValidationError) -> str:
+    return "; ".join(f"{'.'.join(map(str, err['loc'])) or 'input'}: {err['msg']}" for err in e.errors())[:2000]
 
 
 class ToolCall(BaseModel):
@@ -188,6 +219,8 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
     called = {call.tool for call in state.trace}
     if reason == "no_report":
         opening = "Claude stopped without reporting, even after a reminder. "
+    elif reason == "truncated":
+        opening = "Claude's reply was cut off at the output or context limit, so no report was received. "
     else:
         opening = f"The investigation reached its {_LIMIT_LABELS.get(reason, 'run')} limit before Claude reported. "
     summary = opening + (
@@ -206,6 +239,16 @@ def fallback_report(state: InvestigationResult, tools: ToolRegistry, reason: str
         "checked": sorted(called),
         "not_checked": [name for name in tools.names() if name not in called],
         "fallback": True,
+    }
+
+
+def _wrap_up_block(reason: StopReason) -> dict[str, Any]:
+    return {
+        "type": "text",
+        "text": (
+            f"Investigation budget reached ({reason}). Do not call any more tools. Call "
+            f"{FINISH} now with what you have, marking unverified hypotheses inconclusive."
+        ),
     }
 
 
@@ -248,20 +291,65 @@ class Investigator:
         messages: list[dict[str, Any]] = [{"role": "user", "content": alert_prompt(alert)}]
         wrap_up: StopReason | None = None
         nudged = False
+        truncated = 0
 
         while True:
             state.steps += 1
             response = await self.llm.create(messages, system=SYSTEM_PROMPT, tools=definitions)
             state.tokens_used += _tokens(response.usage)
-            messages.append({"role": "assistant", "content": response.content})
 
+            if response.stop_reason in TRUNCATED_STOP_REASONS:
+                # A cut-off turn's last tool call may be partial, so it is never run or stored as the
+                # report. The turn is dropped and the model asked to retry, more briefly (AOCE-68). The
+                # dropped turn still counts as a step, so retries are bounded by the step limit too.
+                truncated += 1
+                if truncated > MAX_TRUNCATION_RETRIES or response.stop_reason == "model_context_window_exceeded":
+                    state.stop_reason = "truncated"
+                    state.report = fallback_report(state, self.tools, "truncated")
+                    return
+                if wrap_up is None:
+                    wrap_up = self._limit_reached(state, soft_deadline)
+                retry = "Your last reply hit the output limit and was discarded. Reply again, more briefly: "
+                if wrap_up is not None:
+                    retry += f"do not call any more tools, call {FINISH} now with a concise report."
+                else:
+                    retry += f"keep the {FINISH} report concise and make fewer tool calls per turn."
+                # Fold the notice into the last user turn rather than sending two user turns in a row. After
+                # a resumed pause the last turn is the assistant's, so the notice is a new user turn there.
+                last = messages[-1]
+                if last["role"] == "user":
+                    content = last["content"]
+                    if isinstance(content, str):
+                        content = [{"type": "text", "text": content}]
+                    messages[-1] = {**last, "content": [*content, {"type": "text", "text": retry}]}
+                else:
+                    messages.append({"role": "user", "content": retry})
+                continue
+            truncated = 0
+            messages.append({"role": "assistant", "content": response.content})
             calls = [b for b in response.content if b.type == "tool_use"]
-            finish = next((b for b in calls if b.name == FINISH), None)
-            if finish is not None:
-                state.report = finish.input
-                state.status = "concluded" if finish.input.get("root_cause") else "inconclusive"
-                state.stop_reason = "finished"
-                return
+            if response.stop_reason == "pause_turn" and wrap_up is None and not calls:
+                # The API paused a long turn; sending it back lets the model resume. Only server tools
+                # cause this and the agent has none, so it is defensive. Limits still apply. A pause with
+                # client tool calls, or after the wrap-up, is handled like any other turn below.
+                wrap_up = self._limit_reached(state, soft_deadline)
+                if wrap_up is not None:
+                    messages.append({"role": "user", "content": [_wrap_up_block(wrap_up)]})
+                continue
+
+            finishes = [b for b in calls if b.name == FINISH]
+            finish_errors: dict[str, str] = {}
+            for finish in finishes:  # the first valid report wins
+                try:
+                    report = FinishReport.model_validate(finish.input)
+                except ValidationError as e:
+                    finish_errors[finish.id] = _validation_errors(e)
+                    log.warning("invalid %s input: %s", FINISH, finish_errors[finish.id])
+                else:
+                    state.report = report.model_dump()
+                    state.status = "concluded" if report.root_cause else "inconclusive"
+                    state.stop_reason = "finished"
+                    return
 
             if wrap_up is not None:
                 # Told to report on the previous turn and did not: report from the trace instead (AOCE-64).
@@ -269,6 +357,11 @@ class Investigator:
                 state.report = fallback_report(state, self.tools, wrap_up)
                 if answer := LLMClient.text(response):
                     state.report["model_text"] = answer  # what Claude wrote instead of reporting
+                if finishes:
+                    # An invalid report on the last turn is kept for the reader, marked as rejected.
+                    first = finishes[0]
+                    rejected = json.dumps(first.input, default=str)[:MAX_TOOL_RESULT_CHARS]
+                    state.report["rejected_report"] = {"input": rejected, "errors": finish_errors[first.id]}
                 return
 
             if not calls:
@@ -282,27 +375,33 @@ class Investigator:
                 messages.append({"role": "user", "content": f"Report your findings by calling {FINISH}."})
                 continue
 
-            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls))
+            results = await asyncio.gather(*(self._run_tool(state.steps, c) for c in calls if c.name != FINISH))
             state.trace.extend(call for call, _ in results)
             content: list[dict[str, Any]] = [block for _, block in results]
+            content.extend(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": f"Report rejected, not stored: {error}. Call {FINISH} again with a corrected report.",
+                    "is_error": True,
+                }
+                for tool_use_id, error in finish_errors.items()
+            )
 
-            if state.steps >= s.investigation_max_steps:
-                wrap_up = "max_steps"
-            elif state.tokens_used >= s.investigation_token_budget:
-                wrap_up = "token_budget"
-            elif time.monotonic() >= soft_deadline:
-                wrap_up = "soft_timeout"
+            wrap_up = self._limit_reached(state, soft_deadline)
             if wrap_up is not None:
-                content.append(
-                    {
-                        "type": "text",
-                        "text": (
-                            f"Investigation budget reached ({wrap_up}). Do not call any more tools. Call "
-                            f"{FINISH} now with what you have, marking unverified hypotheses inconclusive."
-                        ),
-                    }
-                )
+                content.append(_wrap_up_block(wrap_up))
             messages.append({"role": "user", "content": content})
+
+    def _limit_reached(self, state: InvestigationResult, soft_deadline: float) -> StopReason | None:
+        s = self.settings
+        if state.steps >= s.investigation_max_steps:
+            return "max_steps"
+        if state.tokens_used >= s.investigation_token_budget:
+            return "token_budget"
+        if time.monotonic() >= soft_deadline:
+            return "soft_timeout"
+        return None
 
     async def _run_tool(self, step: int, call: Any) -> tuple[ToolCall, dict[str, Any]]:
         tool_input = dict(call.input)

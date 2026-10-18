@@ -1,15 +1,38 @@
 """Thin wrapper around the Anthropic Messages API used by the investigation loop (AOCE-29)."""
 
+import logging
+import re
 from typing import Any
 
 import anthropic
 
 from aoce.config import Settings
 
+log = logging.getLogger("aoce.llm")
+
 # Re-run a declined request on Anthropic's recommended fallback model instead of failing the investigation.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # Models that support the server-side fallback. Haiku does not, so other models get no fallback parameter.
 FALLBACK_MODEL_PREFIXES = ("claude-opus-", "claude-sonnet-", "claude-fable-")
+# Model families known to accept output_config.effort (AOCE-68); others (Haiku 4.5, Sonnet 4.5, Opus 4.1
+# and older) reject it with a 400, so it is only sent to these.
+EFFORT_MODEL_FAMILIES = (
+    "claude-opus-4-5",
+    "claude-opus-4-6",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-opus-5",
+    "claude-sonnet-4-6",
+    "claude-sonnet-5",
+    "claude-haiku-5",
+    "claude-fable",
+    "claude-mythos",
+)
+
+# A family matches when followed by "-", "@" or the end ("claude-opus-5" matches "claude-opus-5-5" but not
+# "claude-opus-50"), optionally after a provider prefix such as Bedrock's "us.anthropic.".
+# AOCE_SEND_EFFORT overrides the check.
+_EFFORT_MODEL_RE = re.compile(rf"(?:^|\.)(?:{'|'.join(map(re.escape, EFFORT_MODEL_FAMILIES))})(?:[-@]|$)")
 
 
 class LLMRefusalError(RuntimeError):
@@ -20,6 +43,15 @@ class LLMClient:
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
         self.settings = settings
         self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._send_effort = settings.send_effort
+        if self._send_effort is None:
+            self._send_effort = bool(_EFFORT_MODEL_RE.search(settings.model))
+            if not self._send_effort:
+                log.warning(
+                    "effort=%s is not sent: %s is not known to accept it (set AOCE_SEND_EFFORT=true to force)",
+                    settings.effort,
+                    settings.model,
+                )
 
     async def aclose(self) -> None:
         """Close the HTTP connection pool."""
@@ -37,10 +69,11 @@ class LLMClient:
             "model": self.settings.model,
             "max_tokens": self.settings.max_tokens,
             "messages": messages,
-            "output_config": {"effort": self.settings.effort},
             # The system prompt and tool definitions repeat on every turn of an investigation.
             "cache_control": {"type": "ephemeral"},
         }
+        if self._send_effort:
+            params["output_config"] = {"effort": self.settings.effort}
         if self.settings.model.startswith(FALLBACK_MODEL_PREFIXES):
             params["betas"] = [FALLBACK_BETA]
             params["fallbacks"] = "default"
