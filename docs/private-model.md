@@ -14,9 +14,9 @@ cluster, and the model is reached through a private route you control.
 |---|---|---|---|---|
 | Claude API (today) | Anthropic | Public HTTPS to `api.anthropic.com` | Anthropic account | None |
 | Your own gateway or proxy | Anthropic or a cloud provider behind it | Agent -> your gateway -> provider | Whatever the gateway uses | None (settings only) |
-| Amazon Bedrock | AWS | Inside your AWS account and region | AWS bill | Small (client construction) |
-| Google Vertex AI | Google Cloud | Inside your GCP project and region | GCP bill | Small (client construction, no fallbacks) |
-| Claude Platform on AWS | Anthropic, on AWS infrastructure | AWS endpoint, IAM-signed | AWS Marketplace | Small (client construction) |
+| Amazon Bedrock | AWS | Inside your AWS account and region | AWS bill | Yes, the provider setting (see Follow-up) |
+| Google Vertex AI | Google Cloud | Inside your GCP project and region | GCP bill | Yes, the provider setting (see Follow-up); also no fallbacks |
+| Claude Platform on AWS | Anthropic, on AWS infrastructure | AWS endpoint, IAM-signed | AWS Marketplace | Yes, the provider setting (see Follow-up) |
 
 All four keep the same model behaviour, tools and prompts. The investigation loop, tool registry and limits do
 not change.
@@ -62,6 +62,10 @@ If the gateway only offers an OpenAI-compatible endpoint, it will not work: the 
 Claude runs inside your AWS account. Prompts and responses stay in the region you call, under your AWS
 data terms, IAM policies and CloudTrail logging. A VPC interface endpoint (PrivateLink) keeps the traffic off
 the public internet; check that the endpoint you use offers one in your region.
+
+The client classes in options 2 to 4 ship in the `anthropic` versions `pyproject.toml` already allows
+(`>=1.13,<2`; checked against 1.13.0 and 1.15.0). The snippets are illustrative: `settings.aws_region` and the
+`gcp_*` fields do not exist in `Settings` until the [Follow-up](#follow-up-a-provider-setting) adds them.
 
 Code change in `LLMClient.__init__`: build the Bedrock client from the same SDK instead of `AsyncAnthropic`.
 
@@ -152,9 +156,11 @@ Options 2 to 4 need one code change, which is not part of this docs-only ticket:
 5. Add the provider's credentials to the Tiltfile and `deploy/agent/agent.yaml` (an IAM role or Workload
    Identity rather than a secret where possible).
 
-## For the pitch deck
+## Summary (for the pitch deck, AOCE-41)
 
 - The agent and every system it reads (Prometheus, OpenSearch, Jaeger, Postgres) run in the customer's cluster.
-- Only the model call leaves the cluster, and it can go to Bedrock or Vertex in the customer's own cloud
-  account and region, or through the customer's own gateway.
-- Switching is configuration plus a small client change. Prompts, tools and investigation limits stay the same.
+- The model call is the one thing that leaves the cluster, and it carries the evidence the agent gathered
+  (metric values, log lines, trace summaries, query statistics). It can go to Bedrock or Vertex in the
+  customer's own cloud account and region, or through the customer's own gateway.
+- A gateway works with settings alone. Bedrock, Vertex and Claude Platform on AWS need the provider setting in
+  [Follow-up](#follow-up-a-provider-setting). Prompts, tools and investigation limits stay the same.
