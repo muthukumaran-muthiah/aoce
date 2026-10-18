@@ -36,12 +36,13 @@ that check are what matter when you change provider.
 ## Option 1: a gateway or proxy (no code change)
 
 Use this when your company already routes LLM traffic through an internal gateway (an API gateway, an LLM
-proxy, or an egress proxy with logging and DLP). The Anthropic SDK reads `ANTHROPIC_BASE_URL`, so the agent
-talks to the gateway instead of `api.anthropic.com`.
+proxy, or an egress proxy with logging and DLP). `llm.py` passes only `api_key` to `AsyncAnthropic`, and the
+SDK then takes the base URL from `ANTHROPIC_BASE_URL`, so the agent talks to the gateway instead of
+`api.anthropic.com`.
 
 | Setting | Where | Value |
 |---|---|---|
-| `ANTHROPIC_BASE_URL` | `AGENT_SETTINGS` in the Tiltfile (or `.env` when running locally) | Your gateway URL, e.g. `https://llm-gateway.internal.example.com` |
+| `ANTHROPIC_BASE_URL` | Not in `AGENT_SETTINGS` yet: add `'ANTHROPIC_BASE_URL': '<url>'` to it in the Tiltfile (or set it in `.env` when running locally) | Your gateway URL, e.g. `https://llm-gateway.internal.example.com` |
 | `ANTHROPIC_API_KEY` | `.env` (Tilt puts it in the `aoce-anthropic` secret) | The key the gateway expects. It must be set: the agent does not investigate without it |
 | `AOCE_MODEL` | `AGENT_SETTINGS` | The model name the gateway routes on |
 
@@ -49,8 +50,10 @@ The gateway must:
 
 - speak the Anthropic Messages API (`POST /v1/messages`) and pass `x-api-key` and `anthropic-beta` headers through;
 - accept top-level `cache_control` and `output_config.effort`, or you set `AOCE_SEND_EFFORT=false`;
-- reject or pass through `fallbacks`. If it fronts Bedrock or Vertex, use a Haiku model (no fallbacks are sent)
-  until the provider switch in [Follow-up](#follow-up-a-provider-setting) lands.
+- pass through or ignore `fallbacks` and its `anthropic-beta` header. The agent sends them whenever `AOCE_MODEL`
+  starts with `claude-opus-`, `claude-sonnet-` or `claude-fable-`, whatever the gateway's backend is. A gateway
+  that rejects them fails every investigation. If it does (or it fronts Bedrock or Vertex), use a Haiku model,
+  for which none is sent, until the provider switch in [Follow-up](#follow-up-a-provider-setting) lands.
 
 If the gateway only offers an OpenAI-compatible endpoint, it will not work: the agent uses the Anthropic SDK.
 
