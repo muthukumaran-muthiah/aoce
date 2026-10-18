@@ -10,6 +10,7 @@ Everything runs on local Kubernetes and is driven by Tilt. No manual scripts.
 **Prerequisites**
 - `ANTHROPIC_API_KEY` in a `.env` file at the repo root (`cp .env.example .env`, then fill it in; `.env` is gitignored). Exporting it in the shell that runs `tilt up` also works. Tilt puts it in a Kubernetes secret.
 - Agent settings (model, effort, investigation limits, backend URLs) are in `AGENT_SETTINGS` in the Tiltfile; edit a value and Tilt redeploys the agent.
+- Private or in-account model access (a gateway, Amazon Bedrock, Google Vertex AI): see [docs/private-model.md](docs/private-model.md).
 - Rancher Desktop with Kubernetes enabled, container engine **dockerd (moby)**, 4 CPUs and 10-12 GB memory
 - `tilt` and `helm` on PATH
 - kubectl context set to `rancher-desktop`
@@ -68,8 +69,11 @@ Also catalogued: `adFailure`, `adManualGc`, `cartFailure`, `imageSlowLoad` (extr
 (not a fault, used for the PII redaction test, AOCE-39); `failedReadinessProbe` (no effect: the chart
 sets no readiness probe on cart); `aiRunawayAgent` / `aiSlowResponse` (the demo's own agent is off).
 Expected symptoms come from reading the demo's source; each entry is `verified: false` until a live run confirms it.
+Run the benchmark with `python eval/run_benchmark.py` (see [`eval/README.md`](eval/README.md)).
 
 ## Agent code
+How an alert flows through the agent to a report, with diagrams: [`docs/architecture.md`](docs/architecture.md).
+
 ```
 src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
 src/aoce/audit.py    Audit log of every tool call (AOCE-40)
@@ -79,7 +83,7 @@ src/aoce/alerts.py   Alertmanager webhook v4 models
 src/aoce/llm.py      Claude client (claude-haiku-5-5 by default, effort high; refusal fallback on Sonnet/Opus)
 src/aoce/config.py   Settings from AOCE_* env vars (see .env.example)
 src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus), db_diagnostics (Postgres),
-                     search_logs (OpenSearch), get_traces (Jaeger)
+                     search_logs (OpenSearch), get_traces (Jaeger), recent_changes and get_diff (GitHub)
 ```
 
 ### Alerts to the agent (AOCE-21)
@@ -129,5 +133,7 @@ curl -s localhost:8000/tools/get_traces -H "Authorization: Bearer $AOCE_API_KEY"
   -d '{"service":"product-catalog","kind":"slow","operation":null,"min_duration_ms":null,"window_minutes":15,"end":null,"limit":5}'
 curl -s localhost:8000/tools/search_logs -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
   -d '{"service":null,"min_severity":"error","text":null,"window_minutes":15,"end":null,"limit":20}'
+curl -s localhost:8000/tools/recent_changes -H "Authorization: Bearer $AOCE_API_KEY" -H 'content-type: application/json' \
+  -d '{"window_minutes":60,"end":null,"path":null}'
 ```
 Tests run in CI (`.github/workflows/ci.yml`). Locally, in Docker: `docker run --rm -v "$PWD":/app -w /app python:3.12-slim sh -c 'pip install -q -e ".[dev]" && pytest -q'`
