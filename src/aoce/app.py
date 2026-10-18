@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
@@ -18,6 +19,7 @@ from aoce.auth import require_api_key, require_webhook_token
 from aoce.config import get_settings
 from aoce.investigation import InvestigationResult, Investigator
 from aoce.llm import LLMClient
+from aoce.postmortem import render_postmortem
 from aoce.tools import build_registry
 
 log = logging.getLogger("aoce")
@@ -258,6 +260,21 @@ async def get_incident(incident_id: str) -> Incident:
     if incident is None:
         raise HTTPException(status_code=404, detail=f"unknown incident: {incident_id}")
     return incident
+
+
+@app.get(
+    "/incidents/{incident_id}/postmortem",
+    dependencies=[Depends(require_api_key)],
+    response_class=PlainTextResponse,
+)
+async def get_postmortem(incident_id: str) -> PlainTextResponse:
+    """The incident's postmortem as Markdown (AOCE-36); 409 while it is still queued or investigating."""
+    incident = INCIDENTS.get(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail=f"unknown incident: {incident_id}")
+    if incident.status in IncidentStore.ACTIVE:
+        raise HTTPException(status_code=409, detail=f"incident {incident_id} is still {incident.status}")
+    return PlainTextResponse(render_postmortem(incident), media_type="text/markdown")
 
 
 @app.get("/tools", dependencies=[Depends(require_api_key)])

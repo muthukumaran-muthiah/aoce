@@ -71,7 +71,8 @@ Expected symptoms come from reading the demo's source; each entry is `verified: 
 
 ## Agent code
 ```
-src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
+src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}, /incidents/{id}/postmortem
+src/aoce/postmortem.py  Markdown postmortem of a finished incident (AOCE-36)
 src/aoce/audit.py    Audit log of every tool call (AOCE-40)
 src/aoce/auth.py     Bearer-token checks for /alerts, /incidents and /tools (AOCE-61)
 src/aoce/investigation.py  Hypothesis-driven investigation loop (AOCE-29)
@@ -117,6 +118,14 @@ marked `skipped`. Alertmanager re-sends of the same alert do not open a second i
 exceptions: an investigation that failed on a transient API error (429, 5xx, network) is retried up
 to 3 times, replacing the failed incident, and an alert whose incident has been dropped from memory
 is investigated afresh.
+
+### Postmortem (AOCE-36)
+Once an incident has finished, `curl -s localhost:8000/incidents/<id>/postmortem -H "Authorization: Bearer $AOCE_API_KEY"`
+returns a Markdown postmortem: summary, impact (service, alert, start and end), a timeline from the
+alert and the audit log, root cause with confidence, hypotheses with evidence, and action items (the
+recommended action plus a check for everything the agent did not look at). It is built from the stored
+report with no further Claude call, so it also works for fallback, failed and skipped incidents. While the
+incident is still `queued` or `investigating` the endpoint answers 409.
 
 ### Trying a tool by hand
 ```bash
