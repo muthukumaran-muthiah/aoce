@@ -68,6 +68,7 @@ Also catalogued: `adFailure`, `adManualGc`, `cartFailure`, `imageSlowLoad` (extr
 (not a fault, used for the PII redaction test, AOCE-39); `failedReadinessProbe` (no effect: the chart
 sets no readiness probe on cart); `aiRunawayAgent` / `aiSlowResponse` (the demo's own agent is off).
 Expected symptoms come from reading the demo's source; each entry is `verified: false` until a live run confirms it.
+Run the benchmark with `python eval/run_benchmark.py` (see [`eval/README.md`](eval/README.md)).
 
 ## Agent code
 ```
