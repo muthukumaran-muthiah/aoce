@@ -1,0 +1,32 @@
+name: Auto-merge
+# Turns on GitHub auto-merge for every PR. GitHub then merges it by itself once the
+# main-branch ruleset is satisfied: all review conversations resolved and the required
+# checks (test, chart, review) green.
+on:
+  pull_request:
+    types: [opened, reopened, ready_for_review]
+
+jobs:
+  enable:
+    if: ${{ !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PR_URL: ${{ github.event.pull_request.html_url }}
+    steps:
+      # Without the ruleset, auto-merge would merge the PR straight away, so refuse to
+      # enable it unless main requires resolved conversations and the test, chart and review checks.
+      - name: Check main-branch ruleset
+        run: |
+          rules=$(gh api "repos/${{ github.repository }}/rules/branches/main")
+          if ! jq -e 'any(.[]; .type == "pull_request" and .parameters.required_review_thread_resolution == true)' <<<"$rules" >/dev/null \
+            || ! jq -e '[.[] | select(.type == "required_status_checks") | .parameters.required_status_checks[].context]
+                         | contains(["test", "chart", "review"])' <<<"$rules" >/dev/null; then
+            echo "::warning::main's ruleset must require resolved conversations and the test, chart and review checks; not enabling auto-merge."
+            exit 1
+          fi
+      - name: Enable auto-merge
+        run: gh pr merge --auto --squash "$PR_URL"
