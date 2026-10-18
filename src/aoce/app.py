@@ -10,6 +10,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
@@ -18,6 +19,7 @@ from aoce.auth import require_api_key, require_webhook_token, warn_unset_secrets
 from aoce.config import Settings, get_settings
 from aoce.investigation import InvestigationResult, Investigator
 from aoce.llm import LLMClient
+from aoce.postmortem import render_postmortem
 from aoce.tools import ToolRegistry, build_registry
 
 log = logging.getLogger("aoce")
@@ -49,6 +51,8 @@ class Incident(BaseModel):
     attempts: int = 1
     # Every tool call this alert's investigations made, earlier failed attempts included, in completion order (AOCE-40).
     audit: list[AuditEntry] = []
+    # When Alertmanager reported the alert resolved; None while it is firing or if no resolved webhook came.
+    resolved_at: datetime | None = None
     # Why the incident failed when no investigation result says so: a crash or a shutdown mid-run.
     error: str | None = None
 
@@ -260,6 +264,12 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
     capacity = settings.max_concurrent_investigations + settings.max_queued_investigations
     for alert in payload.alerts:
         if alert.status != "firing":
+            # Record the end time for the postmortem (AOCE-36). Only a resolved alert counts: a firing
+            # alert's endsAt may be a future resolve-timeout, not an end.
+            # The first resolved notification wins; Alertmanager may re-deliver the group.
+            if (existing := INCIDENTS.find(alert)) is not None and existing.resolved_at is None:
+                ends_at = alert.ends_at
+                existing.resolved_at = ends_at if ends_at and ends_at.year > 1 else datetime.now(UTC)
             continue
         incident = open_incident_for(alert)
         if incident is None:
@@ -299,6 +309,25 @@ async def get_incident(incident_id: str) -> Incident:
     if incident is None:
         raise HTTPException(status_code=404, detail=f"unknown incident: {incident_id}")
     return incident
+
+
+class MarkdownResponse(PlainTextResponse):
+    media_type = "text/markdown"
+
+
+@app.get(
+    "/incidents/{incident_id}/postmortem",
+    dependencies=[Depends(require_api_key)],
+    response_class=MarkdownResponse,
+)
+async def get_postmortem(incident_id: str) -> str:
+    """The incident's postmortem as Markdown (AOCE-36); 409 while it is still queued or investigating."""
+    incident = INCIDENTS.get(incident_id)
+    if incident is None:
+        raise HTTPException(status_code=404, detail=f"unknown incident: {incident_id}")
+    if incident.status in IncidentStore.ACTIVE:
+        raise HTTPException(status_code=409, detail=f"incident {incident_id} is still {incident.status}")
+    return render_postmortem(incident)
 
 
 @app.get("/tools", dependencies=[Depends(require_api_key)])
