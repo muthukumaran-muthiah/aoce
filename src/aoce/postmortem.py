@@ -9,7 +9,7 @@ the action items is not done here.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -27,6 +27,11 @@ def _when(at: datetime | None) -> str:
     return at.strftime("%Y-%m-%d %H:%M:%S UTC") if at else "unknown"
 
 
+def _utc(at: datetime) -> datetime:
+    """Any time in UTC; webhook times without an offset are taken as UTC, so all of them compare."""
+    return at.replace(tzinfo=UTC) if at.tzinfo is None else at.astimezone(UTC)
+
+
 def _one_line(text: Any) -> str:
     """Model and label text on a single Markdown line: newlines folded, no stray list or heading."""
     return " ".join(str(text).split())
@@ -35,7 +40,7 @@ def _one_line(text: Any) -> str:
 def _resolved_at(incident: Incident) -> datetime | None:
     # Alertmanager sends 0001-01-01T00:00:00Z as endsAt while an alert is still firing.
     ends_at = incident.alert.ends_at
-    return ends_at if ends_at and ends_at.year > 1 else None
+    return _utc(ends_at) if ends_at and ends_at.year > 1 else None
 
 
 def render_postmortem(incident: Incident) -> str:
@@ -44,6 +49,7 @@ def render_postmortem(incident: Incident) -> str:
     report: dict[str, Any] = (investigation.report if investigation else None) or {}
     alertname = alert.labels.get("alertname", "alert")
     service = alert.service or "unknown service"
+    started_at = _utc(alert.starts_at)
     resolved_at = _resolved_at(incident)
 
     lines = [f"# Postmortem: {_one_line(alertname)} on {_one_line(service)}", ""]
@@ -60,19 +66,19 @@ def render_postmortem(incident: Incident) -> str:
     ))
     if summary := alert.annotations.get("summary") or alert.annotations.get("description"):
         lines.append(f"- Symptom: {_one_line(summary)}")
-    lines.append(f"- Started: {_when(alert.starts_at)}")
+    lines.append(f"- Started: {_when(started_at)}")
     if resolved_at:
-        minutes = max(int((resolved_at - alert.starts_at).total_seconds() // 60), 0)
+        minutes = max(int((resolved_at - started_at).total_seconds() // 60), 0)
         lines.append(f"- Resolved: {_when(resolved_at)} (about {minutes} min)")
     else:
         lines.append("- Resolved: not recorded")
     lines.append("")
 
     lines += ["## Timeline", ""]
-    events = [(alert.starts_at, "Alert started firing."), (incident.received_at, "Agent received the alert.")]
+    events = [(started_at, "Alert started firing."), (_utc(incident.received_at), "Agent received the alert.")]
     for entry in incident.audit:
         outcome = "" if entry.outcome == "ok" else f" ({entry.outcome})"
-        events.append((entry.at, f"Ran `{entry.tool}` in {entry.duration_ms} ms{outcome}."))
+        events.append((_utc(entry.at), f"Ran `{entry.tool}` in {entry.duration_ms} ms{outcome}."))
     if resolved_at:
         events.append((resolved_at, "Alert resolved."))
     lines += [f"- {_when(at)}: {text}" for at, text in sorted(events, key=lambda e: e[0])]
@@ -80,7 +86,7 @@ def render_postmortem(incident: Incident) -> str:
 
     lines += ["## Root cause", ""]
     if root_cause := report.get("root_cause"):
-        lines.append(f"{_one_line(root_cause)} (confidence: {report.get('confidence', 'unknown')})")
+        lines.append(f"{_one_line(root_cause)} (confidence: {_one_line(report.get('confidence', 'unknown'))})")
     else:
         lines.append("Not established.")
     if investigation and investigation.error:
@@ -90,7 +96,7 @@ def render_postmortem(incident: Incident) -> str:
     if hypotheses := report.get("hypotheses"):
         lines += ["## Hypotheses", ""]
         for h in hypotheses:
-            lines.append(f"- **{h.get('status', 'inconclusive')}**: {_one_line(h.get('statement', ''))}")
+            lines.append(f"- **{_one_line(h.get('status', 'inconclusive'))}**: {_one_line(h.get('statement', ''))}")
             lines += [f"  - {_one_line(e)}" for e in h.get("evidence", [])]
         lines.append("")
 

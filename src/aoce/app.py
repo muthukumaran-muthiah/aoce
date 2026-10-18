@@ -222,6 +222,9 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
     capacity = settings.max_concurrent_investigations + settings.max_queued_investigations
     for alert in payload.alerts:
         if alert.status != "firing":
+            # Keep the end time for the postmortem (AOCE-36); the firing alert carried the zero endsAt.
+            if (existing := INCIDENTS.find(alert)) is not None and alert.ends_at:
+                existing.alert.ends_at = alert.ends_at
             continue
         incident = open_incident_for(alert)
         if incident is None:

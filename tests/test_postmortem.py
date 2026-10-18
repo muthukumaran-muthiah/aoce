@@ -27,12 +27,14 @@ REPORT = {
 }
 
 
-def make_incident(status="concluded", report=REPORT, ends_at="0001-01-01T00:00:00Z", **extra) -> Incident:
+def make_incident(
+    status="concluded", report=REPORT, ends_at="0001-01-01T00:00:00Z", starts_at="2026-10-13T08:00:00Z", **extra
+) -> Incident:
     alert = Alert.model_validate({
         "status": "firing",
         "labels": {"alertname": "HighErrorRate", "service_name": "product-catalog", "severity": "page"},
         "annotations": {"summary": "error rate above 5%"},
-        "startsAt": "2026-10-13T08:00:00Z",
+        "startsAt": starts_at,
         "endsAt": ends_at,
         "fingerprint": "fp",
     })
@@ -87,6 +89,12 @@ def test_timeline_is_in_time_order_and_marks_failed_calls():
     assert "(about 20 min)" in md
 
 
+def test_webhook_times_are_shown_in_utc():
+    md = render_postmortem(make_incident(starts_at="2026-10-13T08:00:00", ends_at="2026-10-13T10:20:00+02:00"))
+    assert "Started: 2026-10-13 08:00:00 UTC" in md  # no offset: taken as UTC
+    assert "Resolved: 2026-10-13 08:20:00 UTC (about 20 min)" in md
+
+
 def test_fallback_report_says_no_root_cause_was_found():
     report = {**REPORT, "root_cause": None, "recommended_action": None, "confidence": "low", "fallback": True}
     md = render_postmortem(make_incident(status="inconclusive", report=report))
@@ -120,6 +128,22 @@ def test_endpoint_returns_markdown(api):
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/markdown")
     assert resp.text.startswith("# Postmortem: HighErrorRate")
+
+
+def test_a_resolved_webhook_sets_the_end_time(api, monkeypatch):
+    monkeypatch.setenv("AOCE_WEBHOOK_TOKEN", "test-token")
+    get_settings.cache_clear()
+    INCIDENTS.add(make_incident(), 10)
+    resolved = {
+        "groupKey": "g", "status": "resolved", "receiver": "aoce",
+        "alerts": [{
+            "status": "resolved", "labels": {}, "startsAt": "2026-10-13T08:00:00Z",
+            "endsAt": "2026-10-13T08:20:00Z", "fingerprint": "fp",
+        }],
+    }
+    assert client.post("/alerts", json=resolved).status_code == 202
+    md = client.get("/incidents/abc123/postmortem").text
+    assert "Resolved: 2026-10-13 08:20:00 UTC (about 20 min)" in md
 
 
 def test_endpoint_refuses_an_unfinished_incident(api):
