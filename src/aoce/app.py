@@ -9,20 +9,29 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from aoce.alerts import Alert, AlertmanagerWebhook
 from aoce.audit import AuditEntry, recording
-from aoce.auth import require_api_key, require_webhook_token
-from aoce.config import get_settings
+from aoce.auth import require_api_key, require_webhook_token, warn_unset_secrets
+from aoce.config import Settings, get_settings
 from aoce.investigation import InvestigationResult, Investigator
 from aoce.llm import LLMClient
-from aoce.tools import build_registry
+from aoce.tools import ToolRegistry, build_registry
 
 log = logging.getLogger("aoce")
 
-tools = build_registry(get_settings())
+_tools: tuple[Settings, ToolRegistry] | None = None
+
+
+def get_tools() -> ToolRegistry:
+    """The tool registry for the current settings, rebuilt when they change (AOCE-69), e.g. in tests."""
+    global _tools
+    settings = get_settings()
+    if _tools is None or _tools[0] is not settings:
+        _tools = (settings, build_registry(settings))
+    return _tools[1]
 
 
 IncidentStatus = Literal["queued", "investigating", "concluded", "inconclusive", "failed", "skipped"]
@@ -40,6 +49,33 @@ class Incident(BaseModel):
     attempts: int = 1
     # Every tool call this alert's investigations made, earlier failed attempts included, in completion order (AOCE-40).
     audit: list[AuditEntry] = []
+    # Why the incident failed when no investigation result says so: a crash or a shutdown mid-run.
+    error: str | None = None
+
+
+class IncidentSummary(BaseModel):
+    """One row of GET /incidents; GET /incidents/{id} has the full report, trace and audit."""
+
+    id: str
+    received_at: datetime
+    alertname: str | None
+    service: str | None
+    status: IncidentStatus
+    root_cause: str | None = None
+    attempts: int
+
+    @classmethod
+    def of(cls, incident: Incident) -> "IncidentSummary":
+        report = incident.investigation.report if incident.investigation else None
+        return cls(
+            id=incident.id,
+            received_at=incident.received_at,
+            alertname=incident.alert.labels.get("alertname"),
+            service=incident.alert.service,
+            status=incident.status,
+            root_cause=(report or {}).get("root_cause"),
+            attempts=incident.attempts,
+        )
 
 
 class IncidentStore:
@@ -118,9 +154,9 @@ def investigation_slots() -> asyncio.Semaphore:
 
 def make_investigator() -> Investigator | None:
     settings = get_settings()
-    if settings.anthropic_api_key is None:
+    if settings.anthropic_api_key is None:  # blank counts as unset, see Settings._blank_is_unset
         return None
-    return Investigator(LLMClient(settings), tools, settings)
+    return Investigator(LLMClient(settings), get_tools(), settings)
 
 
 # One investigator, and so one Anthropic client and connection pool, for the life of the process
@@ -147,6 +183,7 @@ async def close_investigator() -> None:
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     global _slots
     _slots = None  # bind a fresh semaphore, sized from current settings, to this event loop
+    warn_unset_secrets(get_settings())
     yield
     # Stop investigations before closing the client they use, so each ends as cancelled, not as an API error.
     for task in list(_tasks):
@@ -170,10 +207,12 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
     except asyncio.CancelledError:
         # Shutdown: leave a final status rather than "queued" or "investigating" forever.
         incident.status = "failed"
+        incident.error = "cancelled: the agent shut down before the investigation finished"
         raise
-    except Exception:
+    except Exception as e:
         log.exception("investigation of incident %s crashed", incident.id)
         incident.status = "failed"
+        incident.error = f"crashed: {type(e).__name__}: {e}"[:500]
     log.info("incident %s %s", incident.id, incident.status)
 
 
@@ -248,8 +287,9 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
 
 
 @app.get("/incidents", dependencies=[Depends(require_api_key)])
-async def list_incidents() -> list[Incident]:
-    return INCIDENTS.values()
+async def list_incidents(limit: int = Query(50, ge=1, le=500)) -> list[IncidentSummary]:
+    """The newest `limit` incidents, oldest first, as summaries (AOCE-69)."""
+    return [IncidentSummary.of(i) for i in INCIDENTS.values()[-limit:]]
 
 
 @app.get("/incidents/{incident_id}", dependencies=[Depends(require_api_key)])
@@ -263,15 +303,23 @@ async def get_incident(incident_id: str) -> Incident:
 @app.get("/tools", dependencies=[Depends(require_api_key)])
 async def list_tools() -> list[dict[str, Any]]:
     """Tool definitions exactly as the agent sees them."""
-    return tools.definitions()
+    return get_tools().definitions()
 
 
 @app.post("/tools/{name}", dependencies=[Depends(require_api_key)])
 async def run_tool(name: str, tool_input: dict[str, Any]) -> Any:
-    """Run one read-only tool by hand, e.g. to check it against the live demo before the agent uses it."""
+    """Run one read-only tool by hand, e.g. to check it against the live demo before the agent uses it.
+
+    422 for arguments the tool rejects, 502 for a backend failure, 504 past AOCE_TOOL_TIMEOUT_S.
+    """
+    tools, timeout = get_tools(), get_settings().tool_timeout_s
     if name not in tools.names():
         raise HTTPException(status_code=404, detail=f"unknown tool: {name}")
-    content, is_error = await tools.run(name, tool_input)
-    if is_error:
-        raise HTTPException(status_code=502, detail=content)
-    return json.loads(content)
+    try:
+        outcome = await asyncio.wait_for(tools.call(name, tool_input), timeout=timeout)
+    except TimeoutError:
+        raise HTTPException(status_code=504, detail=f"{name} timed out after {timeout:.0f}s") from None
+    if outcome.is_error:
+        code = status.HTTP_422_UNPROCESSABLE_CONTENT if outcome.bad_input else status.HTTP_502_BAD_GATEWAY
+        raise HTTPException(status_code=code, detail=outcome.content)
+    return json.loads(outcome.content)

@@ -22,13 +22,15 @@ from typing import Any
 
 import httpx
 
-from aoce.tools import Tool, ToolError
+from aoce.tools import Tool, ToolError, ToolInputError
 from aoce.tools.metrics import SERVICE_RE, _parse_end
 
 MAX_HITS = 50
 BODY_CHARS = 500
 MAX_ATTRIBUTES = 10
 ATTRIBUTE_CHARS = 200
+# Text kept past a cut before redacting, so a secret spanning the cut is still recognised whole.
+REDACT_MARGIN = 200
 QUERY_CHARS = 200
 MAX_PATTERNS = 10
 SEARCH_TIMEOUT = "10s"
@@ -206,8 +208,11 @@ def _cut(value: Any, n: int) -> Any:
         value = str(value)
     if not isinstance(value, str):
         return value
-    value = redact_log_text(value)
-    return value[:n] + "…" if len(value) > n else value
+    # Cut to a margin first so a huge line costs bounded regex work; a secret straddling the margin is
+    # then masked or cut away by the final cut.
+    cut = len(value) > n
+    value = redact_log_text(value[: n + REDACT_MARGIN])
+    return value[:n] + "…" if cut or len(value) > n else value
 
 
 def _record(hit: dict[str, Any]) -> dict[str, Any]:
@@ -236,11 +241,11 @@ def _buckets(aggs: dict[str, Any], name: str) -> dict[str, int]:
 def search_logs_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -> Tool:
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         service = args.get("service") or None
-        if service and not SERVICE_RE.match(service):
-            raise ToolError(f"invalid service name: {service!r}")
+        if service and not SERVICE_RE.fullmatch(service):
+            raise ToolInputError(f"invalid service name: {service!r}")
         min_severity = args.get("min_severity") or "error"
         if min_severity not in SEVERITY_NUMBERS:
-            raise ToolError(f"unknown min_severity: {min_severity!r} (use one of {', '.join(LEVELS)})")
+            raise ToolInputError(f"unknown min_severity: {min_severity!r} (use one of {', '.join(LEVELS)})")
         text = (args.get("text") or "").strip()[:QUERY_CHARS] or None
         minutes = min(max(int(args.get("window_minutes") or 15), 1), 180)
         limit = min(max(int(args.get("limit") or 20), 1), MAX_HITS)

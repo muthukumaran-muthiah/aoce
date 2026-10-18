@@ -23,8 +23,7 @@ def _require(env_var: str, secret_of: Callable[[Settings], SecretStr | None]):
     async def check(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
         expected = secret_of(get_settings())
         if expected is None or not expected.get_secret_value():
-            # Name the setting only in our log, not to an unauthenticated caller.
-            log.warning("rejected a request: %s is not set, so this endpoint is turned off", env_var)
+            # warn_unset_secrets names the setting once at startup; nothing here for an unauthenticated caller.
             raise HTTPException(status.HTTP_403_FORBIDDEN, detail="disabled")
         given = credentials.credentials if credentials else ""
         if not secrets.compare_digest(given.encode(), expected.get_secret_value().encode()):
@@ -34,6 +33,17 @@ def _require(env_var: str, secret_of: Callable[[Settings], SecretStr | None]):
             )
 
     return check
+
+
+SECRETS = {"AOCE_WEBHOOK_TOKEN": lambda s: s.webhook_token, "AOCE_API_KEY": lambda s: s.api_key}
+
+
+def warn_unset_secrets(settings: Settings) -> None:
+    """Log each unset secret once at startup rather than on every rejected request (AOCE-69)."""
+    for env_var, secret_of in SECRETS.items():
+        secret = secret_of(settings)
+        if secret is None or not secret.get_secret_value():
+            log.warning("%s is not set, so its endpoints are turned off", env_var)
 
 
 require_webhook_token = _require("AOCE_WEBHOOK_TOKEN", lambda s: s.webhook_token)

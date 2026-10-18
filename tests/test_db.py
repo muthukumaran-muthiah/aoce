@@ -14,6 +14,7 @@ import pytest
 
 from aoce.config import Settings
 from aoce.tools import ToolRegistry
+from aoce.tools import db
 from aoce.tools.db import db_diagnostics_tool
 
 ADMIN_URL = os.environ.get("AOCE_TEST_ADMIN_URL")
@@ -105,13 +106,49 @@ async def test_blocking_names_the_lock_holder(monitoring_url):
         await waiter.close()
 
 
-async def test_sessions_are_read_only(monitoring_url):
+async def test_every_query_runs_read_only_with_a_timeout(monitoring_url):
     url, _ = monitoring_url
-    async with await psycopg.AsyncConnection.connect(
-        url, options="-c default_transaction_read_only=on"
-    ) as conn:
+    async with await psycopg.AsyncConnection.connect(url, autocommit=True) as conn:
         with pytest.raises(psycopg.errors.ReadOnlySqlTransaction):
-            await conn.execute("CREATE TEMP TABLE t (x int)")
+            await db._fetch(conn, "CREATE TEMP TABLE t (x int)", {})
+        assert (await db._fetch(conn, "SHOW statement_timeout", {}))[0]["statement_timeout"] == "5s"
+        # SET LOCAL ends with the transaction, so the session itself is untouched.
+        assert (await (await conn.execute("SHOW statement_timeout")).fetchone())[0] == "0"
+
+
+async def test_options_in_the_url_are_kept(monitoring_url):
+    """The read-only setup no longer passes `options=`, which replaced the URL's own (AOCE-69)."""
+    url, _ = monitoring_url
+    seen = []
+    real_fetch = db._fetch
+
+    async def fetch(conn, sql, params):
+        seen.append((await (await conn.execute("SHOW search_path")).fetchone())[0])
+        return await real_fetch(conn, sql, params)
+
+    tool = db.db_diagnostics_tool(Settings(database_url=url_for(DB, user="monitoring_user",
+                                  password="monitoring_password", options="-c search_path=catalog")))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(db, "_fetch", fetch)
+        content, is_error = await ToolRegistry([tool]).run("db_diagnostics", {"check": "connections", "limit": 5})
+    assert not is_error, content
+    assert set(seen) == {"catalog"}
+
+
+async def test_activity_in_other_databases_is_left_out(monitoring_url):
+    url, _ = monitoring_url
+    other = await psycopg.AsyncConnection.connect(ADMIN_URL, application_name="other-db-client")
+    try:
+        await other.execute("SELECT 1")  # leaves the transaction open: idle in transaction
+        out = await run(url, "connections")
+        assert "other-db-client" not in [c["client"] for c in out["connections"]["by_client"]]
+        summary = out["connections"]["summary"]
+        assert summary["total"] > summary["in_this_database"] >= 1
+        assert summary["idle_in_transaction"] >= 1
+        assert "%%" not in json.dumps(out["connections"]["sql"])
+    finally:
+        await other.rollback()
+        await other.close()
 
 
 async def test_unreachable_database_is_a_tool_error():

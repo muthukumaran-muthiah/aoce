@@ -3,7 +3,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field, SecretStr
+from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="AOCE_", env_file=".env", extra="ignore")
 
     # LLM
-    anthropic_api_key: str | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
+    anthropic_api_key: SecretStr | None = Field(default=None, validation_alias="ANTHROPIC_API_KEY")
     model: str = "claude-haiku-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "high"
     max_tokens: int = 16000
@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     # Investigation limits (AOCE-29): model turns, wall-clock seconds, and total tokens across turns.
     investigation_max_steps: int = 12
     investigation_timeout_s: float = 300
+    # A cost guard, not a volume cap: cache reads count at CACHE_READ_WEIGHT, since every turn re-sends the
+    # whole history and a cached read costs a tenth of a fresh input token.
     investigation_token_budget: int = 300_000
     tool_timeout_s: float = 30
     # How many investigations run at once (AOCE-59); the rest wait as "queued".
@@ -52,6 +54,12 @@ class Settings(BaseSettings):
     # Change history (AOCE-23, AOCE-28)
     github_repo: str | None = None
     github_token: str | None = None
+
+    @field_validator("anthropic_api_key", "webhook_token", "api_key", "database_url", "github_token", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, v: object) -> object:
+        # .env.example and the Tiltfile leave unset secrets as "", which would otherwise count as set (AOCE-69).
+        return None if isinstance(v, str) and not v.strip() else v
 
 
 @lru_cache

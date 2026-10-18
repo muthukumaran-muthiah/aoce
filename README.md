@@ -86,7 +86,8 @@ src/aoce/tools/      Read-only tools the agent calls: query_metrics (Prometheus)
 Prometheus evaluates two rules on span metrics from server spans: `HighErrorRate` (more than 5% failed
 requests for 1 minute) and `HighLatencyP95` (p95 above 1s for 2 minutes). Alertmanager posts firing
 alerts to `http://aoce-agent.aoce:8000/alerts`. Check that the agent received them:
-`curl -s localhost:8000/incidents -H "Authorization: Bearer $AOCE_API_KEY"`.
+`curl -s localhost:8000/incidents -H "Authorization: Bearer $AOCE_API_KEY"` lists the newest 50 as
+summaries (id, alert, service, status, root cause; `?limit=` up to 500); `/incidents/<id>` has the rest.
 
 ### API authentication (AOCE-61)
 Set `AOCE_WEBHOOK_TOKEN` and `AOCE_API_KEY` in `.env` (`openssl rand -hex 32` each). Tilt puts them in
@@ -98,8 +99,8 @@ http://localhost:8000/docs use Authorize). An unset value turns its endpoints of
 Each new firing alert starts an investigation in the background. Claude forms a hypothesis, calls a
 read-only tool to test it (every call carries the hypothesis it tests), and repeats until it reports
 through `finish_investigation`: summary, root cause, confidence, each hypothesis with its evidence,
-recommended action, and what was and was not checked. The loop stops at 12 steps, 300k tokens or 5
-minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with what it has, and if it
+recommended action, and what was and was not checked. The loop stops at 12 model calls, 300k tokens (cache reads count
+at a tenth, as they are billed) or 5 minutes (`AOCE_INVESTIGATION_*`); near a limit Claude is told to report with what it has, and if it
 still doesn't, the investigation ends as `inconclusive` with a low-confidence report built from its
 tool calls (`"fallback": true`). At most 2 investigations run at once
 (`AOCE_MAX_CONCURRENT_INVESTIGATIONS`) and up to 20 more wait as `queued`
@@ -107,7 +108,7 @@ tool calls (`"fallback": true`). At most 2 investigations run at once
 the webhook answers 503, so Alertmanager retries it with backoff. The last 200 incidents are kept in memory
 (`AOCE_MAX_INCIDENTS`). Follow it at
 `http://localhost:8000/incidents/<id>`: `status` goes `queued` → `investigating` → `concluded` /
-`inconclusive` / `failed`, and `investigation.trace` lists every tool call with its hypothesis.
+`inconclusive` / `failed` (`error` says why when a crash or shutdown ended it), and `investigation.trace` lists every tool call with its hypothesis.
 `audit` is the incident's append-only audit log (AOCE-40): one entry per tool call as it finishes, with
 the time, tool, arguments, duration, outcome (`ok`, `error`, or `cancelled` when a timeout cut it off)
 and result size. Each entry, and each call made by hand through `POST /tools/{name}` (actor

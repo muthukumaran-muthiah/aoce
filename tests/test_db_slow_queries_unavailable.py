@@ -58,3 +58,19 @@ async def test_overview_reports_slow_queries_unavailable_and_runs_other_checks(f
     assert out["blocking"]["blocked_sessions"] == []
     assert out["seq_scans"]["rows"] == []
     assert out["connections"]["summary"]["usage_ratio"] == 0.05
+
+
+async def test_a_failure_reading_the_server_time_is_a_tool_error(monkeypatch):
+    async def connect(*args, **kwargs):
+        return FakeConn()
+
+    async def fetch(conn, sql, params):
+        if sql == "SELECT now() AS now":
+            raise psycopg.OperationalError("server closed the connection")
+        return [{"total": 5, "max_connections": 100}] if sql is db.CONNECTIONS_SQL else []
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    monkeypatch.setattr(db, "_fetch", fetch)
+    registry = ToolRegistry([db.db_diagnostics_tool(Settings(database_url="postgresql://x"))])
+    content, is_error = await registry.run("db_diagnostics", {"check": "connections", "limit": 5})
+    assert is_error and content == "database query failed: server closed the connection"
