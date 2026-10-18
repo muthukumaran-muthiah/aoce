@@ -70,6 +70,8 @@ sets no readiness probe on cart); `aiRunawayAgent` / `aiSlowResponse` (the demo'
 Expected symptoms come from reading the demo's source; each entry is `verified: false` until a live run confirms it.
 
 ## Agent code
+How an alert flows through the agent to a report, with diagrams: [`docs/architecture.md`](docs/architecture.md).
+
 ```
 src/aoce/app.py      FastAPI app: /healthz, POST /alerts (Alertmanager webhook), /incidents, /incidents/{id}
 src/aoce/audit.py    Audit log of every tool call (AOCE-40)
