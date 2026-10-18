@@ -38,9 +38,9 @@ def _one_line(text: Any) -> str:
 
 
 def _resolved_at(incident: Incident) -> datetime | None:
-    # Alertmanager sends 0001-01-01T00:00:00Z as endsAt while an alert is still firing.
-    ends_at = incident.alert.ends_at
-    return _utc(ends_at) if ends_at and ends_at.year > 1 else None
+    # Set only by a resolved webhook; a firing alert's endsAt is zero or a future resolve-timeout.
+    at = incident.resolved_at
+    return _utc(at) if at else None
 
 
 def render_postmortem(incident: Incident) -> str:

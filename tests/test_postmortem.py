@@ -28,14 +28,14 @@ REPORT = {
 
 
 def make_incident(
-    status="concluded", report=REPORT, ends_at="0001-01-01T00:00:00Z", starts_at="2026-10-13T08:00:00Z", **extra
+    status="concluded", report=REPORT, resolved_at=None, starts_at="2026-10-13T08:00:00Z", **extra
 ) -> Incident:
     alert = Alert.model_validate({
         "status": "firing",
         "labels": {"alertname": "HighErrorRate", "service_name": "product-catalog", "severity": "page"},
         "annotations": {"summary": "error rate above 5%"},
         "startsAt": starts_at,
-        "endsAt": ends_at,
+        "endsAt": "2026-10-13T08:05:00Z",  # a firing alert's resolve-timeout, not an end
         "fingerprint": "fp",
     })
     investigation = None
@@ -47,6 +47,7 @@ def make_incident(
         id="abc123",
         received_at=datetime(2026, 10, 13, 8, 0, 30, tzinfo=UTC),
         alert=alert,
+        resolved_at=resolved_at,
         status=status,
         investigation=investigation,
         audit=[
@@ -73,11 +74,12 @@ def test_concluded_incident_has_every_section():
     assert "- [ ] Terminate the blocking backend" in md
     assert "- [ ] Check get_traces, which the agent did not." in md
     assert "severity page" in md
-    assert "Resolved: not recorded" in md  # Alertmanager's zero endsAt means still firing
+    assert "Resolved: not recorded" in md  # no resolved webhook, whatever the firing endsAt says
+    assert "Alert resolved." not in md
 
 
 def test_timeline_is_in_time_order_and_marks_failed_calls():
-    md = render_postmortem(make_incident(ends_at="2026-10-13T08:20:00Z"))
+    md = render_postmortem(make_incident(resolved_at="2026-10-13T08:20:00Z"))
     timeline = md.split("## Timeline\n\n")[1].split("\n\n")[0].splitlines()
     assert [line.split(": ", 1)[1] for line in timeline] == [
         "Alert started firing.",
@@ -90,7 +92,7 @@ def test_timeline_is_in_time_order_and_marks_failed_calls():
 
 
 def test_webhook_times_are_shown_in_utc():
-    md = render_postmortem(make_incident(starts_at="2026-10-13T08:00:00", ends_at="2026-10-13T10:20:00+02:00"))
+    md = render_postmortem(make_incident(starts_at="2026-10-13T08:00:00", resolved_at="2026-10-13T10:20:00+02:00"))
     assert "Started: 2026-10-13 08:00:00 UTC" in md  # no offset: taken as UTC
     assert "Resolved: 2026-10-13 08:20:00 UTC (about 20 min)" in md
 

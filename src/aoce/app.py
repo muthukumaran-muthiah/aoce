@@ -42,6 +42,8 @@ class Incident(BaseModel):
     attempts: int = 1
     # Every tool call this alert's investigations made, earlier failed attempts included, in completion order (AOCE-40).
     audit: list[AuditEntry] = []
+    # When Alertmanager reported the alert resolved; None while it is firing or if no resolved webhook came.
+    resolved_at: datetime | None = None
 
 
 class IncidentStore:
@@ -222,9 +224,11 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
     capacity = settings.max_concurrent_investigations + settings.max_queued_investigations
     for alert in payload.alerts:
         if alert.status != "firing":
-            # Keep the end time for the postmortem (AOCE-36); the firing alert carried the zero endsAt.
-            if (existing := INCIDENTS.find(alert)) is not None and alert.ends_at:
-                existing.alert.ends_at = alert.ends_at
+            # Record the end time for the postmortem (AOCE-36). Only a resolved alert counts: a firing
+            # alert's endsAt may be a future resolve-timeout, not an end.
+            if (existing := INCIDENTS.find(alert)) is not None:
+                ends_at = alert.ends_at
+                existing.resolved_at = ends_at if ends_at and ends_at.year > 1 else datetime.now(UTC)
             continue
         incident = open_incident_for(alert)
         if incident is None:
