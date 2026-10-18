@@ -67,3 +67,14 @@ def test_endpoints_are_off_when_their_secret_is_unset(no_secrets, method, path):
     resp = client.request(method, path, json={}, headers={"Authorization": "Bearer "})
     assert resp.status_code == 403
     assert "disabled" in resp.json()["detail"]
+
+
+def test_an_unset_secret_is_logged_once_at_startup_not_per_request(no_secrets, caplog):
+    with caplog.at_level("WARNING", logger="aoce"), TestClient(app) as c:
+        for _ in range(3):
+            c.get("/incidents")
+    warnings = [r.getMessage() for r in caplog.records if "is not set" in r.getMessage()]
+    assert sorted(warnings) == [
+        "AOCE_API_KEY is not set, so its endpoints are turned off",
+        "AOCE_WEBHOOK_TOKEN is not set, so its endpoints are turned off",
+    ]

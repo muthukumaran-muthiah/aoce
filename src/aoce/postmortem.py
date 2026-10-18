@@ -101,8 +101,8 @@ def render_postmortem(incident: Incident) -> str:
         lines.append(f"{_one_line(root_cause)} (confidence: {_one_line(report.get('confidence', 'unknown'))})")
     else:
         lines.append("Not established.")
-    if investigation and investigation.error:
-        lines.append(f"\nThe investigation ended with an error: {_one_line(investigation.error)}")
+    if error := (investigation.error if investigation else None) or incident.error:
+        lines.append(f"\nThe investigation ended with an error: {_one_line(error)}")
     lines.append("")
 
     if hypotheses := report.get("hypotheses"):

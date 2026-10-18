@@ -2,8 +2,9 @@
 
 Missing indexes, slow queries and lock contention were the root cause in 3 of 6 discovery
 interviews, and on-call engineers often lack DB access at night. This tool connects as a monitoring
-role (pg_monitor in the OTel Demo), forces every transaction read-only with a statement timeout, and
-never kills sessions or writes.
+role (pg_monitor in the OTel Demo), runs every query in its own read-only transaction with a statement
+timeout, and never kills sessions or writes. Activity is limited to the configured database; only the
+connection summary is server-wide, since max_connections is.
 
 pg_stat_activity holds the live query text with its literal values (emails, tokens, order IDs), so
 all query text passes through redact_query before it reaches the model or the incident trace
@@ -18,7 +19,8 @@ from typing import Any
 import psycopg
 from psycopg.rows import dict_row
 
-from aoce.tools import Tool, ToolError
+from aoce.tools import Tool, ToolError, ToolInputError
+from aoce.tools.logs import redact_log_text
 
 STATEMENT_TIMEOUT_MS = 5000
 LARGE_TABLE_ROWS = 1000
@@ -45,6 +47,7 @@ SELECT a.pid, a.usename, a.application_name, a.state, a.wait_event_type, a.wait_
        left(a.query, 2000) AS query
 FROM pg_stat_activity a
 WHERE cardinality(pg_blocking_pids(a.pid)) > 0
+  AND a.datname = current_database()
 ORDER BY a.query_start
 LIMIT %(limit)s
 """
@@ -66,6 +69,7 @@ SELECT a.pid, a.usename, a.application_name, a.state,
 FROM pg_stat_activity a
 WHERE a.xact_start < now() - interval '30 seconds'
   AND a.backend_type = 'client backend'
+  AND a.datname = current_database()
   AND a.pid <> pg_backend_pid()
 ORDER BY a.xact_start
 LIMIT %(limit)s
@@ -84,7 +88,8 @@ CONNECTIONS_SQL = """
 SELECT count(*) AS total,
        count(*) FILTER (WHERE state = 'active') AS active,
        count(*) FILTER (WHERE state = 'idle') AS idle,
-       count(*) FILTER (WHERE state LIKE 'idle in transaction%%') AS idle_in_transaction,
+       count(*) FILTER (WHERE starts_with(state, 'idle in transaction')) AS idle_in_transaction,
+       count(*) FILTER (WHERE datname = current_database()) AS in_this_database,
        current_setting('max_connections')::int AS max_connections
 FROM pg_stat_activity
 WHERE backend_type = 'client backend'
@@ -93,7 +98,7 @@ WHERE backend_type = 'client backend'
 CONNECTIONS_BY_APP_SQL = """
 SELECT coalesce(nullif(application_name, ''), usename) AS client, count(*) AS connections
 FROM pg_stat_activity
-WHERE backend_type = 'client backend'
+WHERE backend_type = 'client backend' AND datname = current_database()
 GROUP BY 1
 ORDER BY 2 DESC
 LIMIT %(limit)s
@@ -108,7 +113,8 @@ last stats reset, not only the alert window; compare mean_ms and max_ms).
 - blocking: sessions waiting on locks, who blocks them, the locks the blockers hold, and transactions \
 open longer than 30 seconds. Use this first when a service backed by the database gets slow or times out.
 - seq_scans: tables with at least 1000 rows read by sequential scans, a sign of a missing index.
-- connections: connection count by state and by client versus max_connections.
+- connections: server-wide connection count by state versus max_connections, and this database's \
+connections by client.
 - overview: all of the above in one call.
 Literal values in query text are replaced with $1, $2, ... placeholders.
 Returns rows plus the SQL that produced them so you can cite it."""
@@ -181,8 +187,14 @@ def _clean(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [{k: float(v) if isinstance(v, Decimal) else v for k, v in row.items()} for row in rows]
 
 
+# Per transaction rather than as connection `options`, which would replace any options in the URL and
+# which PgBouncer rejects as a startup parameter; SET LOCAL also holds under transaction pooling.
+READ_ONLY_SQL = f"SET TRANSACTION READ ONLY; SET LOCAL statement_timeout = {STATEMENT_TIMEOUT_MS}"
+
+
 async def _fetch(conn: psycopg.AsyncConnection, sql: str, params: dict[str, Any]) -> list[dict[str, Any]]:
-    async with conn.cursor(row_factory=dict_row) as cur:
+    async with conn.transaction(), conn.cursor(row_factory=dict_row) as cur:
+        await cur.execute(READ_ONLY_SQL)
         await cur.execute(sql, params)
         return _clean(await cur.fetchall())
 
@@ -227,6 +239,13 @@ async def _connections(conn, limit: int) -> dict[str, Any]:
     return {"summary": summary, "by_client": by_client, "sql": [CONNECTIONS_SQL.strip(), CONNECTIONS_BY_APP_SQL.strip()]}
 
 
+def _error_text(e: psycopg.Error) -> str:
+    """The server's primary message without the statement context, with secrets and emails masked: it
+    goes to the model and the incident trace (AOCE-69)."""
+    text = (e.diag.message_primary if e.diag else None) or str(e)
+    return redact_log_text(" ".join(text.split()))[:300]
+
+
 RUNNERS = {"slow_queries": _slow_queries, "blocking": _blocking, "seq_scans": _seq_scans, "connections": _connections}
 
 
@@ -236,28 +255,28 @@ def db_diagnostics_tool(settings) -> Tool:
             raise ToolError("no database configured (set AOCE_DATABASE_URL)")
         check = args["check"]
         if check != "overview" and check not in RUNNERS:
-            raise ToolError(f"unknown check: {check}")
+            raise ToolInputError(f"unknown check: {check}")
         limit = min(max(int(args.get("limit") or 10), 1), 20)
         try:
             conn = await psycopg.AsyncConnection.connect(
-                settings.database_url,
+                settings.database_url.get_secret_value(),
                 autocommit=True,
                 connect_timeout=5,
-                options=f"-c default_transaction_read_only=on -c statement_timeout={STATEMENT_TIMEOUT_MS}",
             )
         except psycopg.OperationalError as e:
-            raise ToolError(f"cannot connect to the database: {str(e).strip()}") from e
+            raise ToolError(f"cannot connect to the database: {_error_text(e)}") from e
 
         async with conn:
             try:
                 checks = CHECKS if check == "overview" else [check]
                 results = {name: await RUNNERS[name](conn, limit) for name in checks}
+                checked_at = (await _fetch(conn, "SELECT now() AS now", {}))[0]["now"]
             except psycopg.Error as e:
-                raise ToolError(f"database query failed: {str(e).strip()}") from e
+                raise ToolError(f"database query failed: {_error_text(e)}") from e
             info = conn.info
             return {
                 "database": {"host": info.host, "dbname": info.dbname, "user": info.user},
-                "checked_at_server_time": (await _fetch(conn, "SELECT now() AS now", {}))[0]["now"],
+                "checked_at_server_time": checked_at,
                 **results,
             }
 

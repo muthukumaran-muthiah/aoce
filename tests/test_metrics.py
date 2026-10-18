@@ -126,3 +126,52 @@ def test_definition_is_strict():
     schema = definition["input_schema"]
     assert schema["additionalProperties"] is False
     assert set(schema["required"]) == set(schema["properties"])
+
+
+# AOCE-69 edge cases.
+
+
+async def test_a_rise_from_a_zero_baseline_is_flagged():
+    body = matrix({"cart": [0.0] * 11 + [0.2] * 10, "ad": [0.0] * 21})
+    registry, _ = registry_with(lambda r: httpx.Response(200, json=body))
+    out = json.loads((await registry.run("query_metrics", args(signal="error_rate")))[0])
+    by_service = {r["labels"]["service_name"]: r for r in out["results"]}
+    assert by_service["cart"]["baseline_avg"] == 0.0 and by_service["cart"]["change_vs_baseline"] is None
+    assert by_service["cart"]["rose_from_zero"] is True
+    assert by_service["ad"]["rose_from_zero"] is False
+
+
+async def test_end_with_an_offset_is_converted_to_utc():
+    registry, seen = registry_with(lambda r: httpx.Response(200, json=matrix({})))
+    out = json.loads((await registry.run("query_metrics", args(end="2026-10-13T13:00:00+04:00")))[0])
+    assert out["window"]["end"] == "2026-10-13T09:00:00+00:00"
+    assert "2026-10-13+09%3A00%3A00" in out["evidence"]["graph_url"]
+    assert float(seen[0].url.params["end"]) == END.timestamp()
+
+
+async def test_a_service_name_with_a_trailing_newline_is_rejected():
+    registry, seen = registry_with(lambda r: httpx.Response(200, json=matrix({})))
+    content, is_error = await registry.run("query_metrics", args(service="cart\n"))
+    assert is_error and "invalid service name" in content and not seen
+
+
+async def test_backend_errors_carry_no_url_and_are_redacted():
+    def fail(request):
+        raise httpx.ConnectError("cannot reach http://admin:hunter2@prom")
+
+    registry, _ = registry_with(fail)
+    content, is_error = await registry.run("query_metrics", args())
+    assert is_error and content == "Prometheus unreachable: ConnectError"
+
+    registry, _ = registry_with(lambda r: httpx.Response(400, json={"status": "error", "error": "bad token=abc123"}))
+    content, is_error = await registry.run("query_metrics", args())
+    assert is_error and "abc123" not in content and "token=[redacted]" in content
+
+
+@pytest.mark.parametrize("body", [b"[1, 2]", b"not json"])
+async def test_a_non_object_or_invalid_json_body_is_a_tool_error(body):
+    registry, _ = registry_with(
+        lambda r: httpx.Response(200, content=body, headers={"content-type": "application/json"})
+    )
+    content, is_error = await registry.run("query_metrics", args())
+    assert is_error and content.startswith("Prometheus error (200)")

@@ -72,7 +72,7 @@ def test_firing_alerts_open_incidents_and_resolved_are_ignored():
     ids = resp.json()["incidents"]
     assert len(ids) == 2
     incidents = client.get("/incidents").json()
-    assert {i["alert"]["labels"]["service_name"] for i in incidents} == {"product-catalog"}
+    assert {(i["alertname"], i["service"]) for i in incidents} == {("HighErrorRate", "product-catalog")}
 
 
 def test_malformed_payload_is_rejected():
@@ -192,6 +192,7 @@ def test_shutdown_cancels_running_investigations_before_closing_the_client(monke
             time.sleep(0.02)
     assert events == ["started", "closed"]
     assert INCIDENTS.get(incident_id).status == "failed"
+    assert INCIDENTS.get(incident_id).error.startswith("cancelled")
 
 
 def test_firing_alert_is_investigated_in_the_background(monkeypatch):
@@ -371,3 +372,116 @@ def test_the_incident_exposes_an_audit_entry_per_tool_call(monkeypatch):
     [entry] = body["audit"]
     assert entry["incident_id"] == incident_id and entry["actor"] == "agent"
     assert entry["tool"] == "echo" and entry["arguments"] == {"x": "a"} and entry["outcome"] == "ok"
+
+
+# AOCE-69 edge cases.
+
+
+def echo_registry(delay: float = 0.0):
+    import asyncio
+
+    from aoce.tools import Tool, ToolError, ToolInputError, ToolRegistry
+
+    async def echo(tool_input):
+        await asyncio.sleep(delay)
+        if tool_input["x"] == "bad":
+            raise ToolInputError("x must not be bad")
+        if tool_input["x"] == "down":
+            raise ToolError("backend down")
+        return {"x": tool_input["x"]}
+
+    schema = {"type": "object", "properties": {"x": {"type": "string"}}, "required": ["x"], "additionalProperties": False}
+    return ToolRegistry([Tool("echo", "echo", schema, echo)])
+
+
+@pytest.mark.parametrize(
+    ("tool_input", "code", "detail"),
+    [
+        ({"x": "a"}, 200, None),
+        ({"x": 1}, 422, "input.x: expected string"),
+        ({}, 422, "input.x: required"),
+        ({"x": "a", "y": 1}, 422, "input.y: unexpected property"),
+        ({"x": "bad"}, 422, "x must not be bad"),
+        ({"x": "down"}, 502, "backend down"),
+    ],
+)
+def test_tool_endpoint_answers_4xx_for_bad_arguments_and_502_for_backends(monkeypatch, tool_input, code, detail):
+    monkeypatch.setattr("aoce.app.get_tools", echo_registry)
+    resp = client.post("/tools/echo", json=tool_input)
+    assert resp.status_code == code
+    if detail:
+        assert detail in resp.json()["detail"]
+
+
+def test_tool_endpoint_times_out_with_504(monkeypatch):
+    monkeypatch.setattr("aoce.app.get_tools", lambda: echo_registry(delay=1))
+    monkeypatch.setenv("AOCE_TOOL_TIMEOUT_S", "0.05")
+    get_settings.cache_clear()
+    resp = client.post("/tools/echo", json={"x": "a"})
+    assert resp.status_code == 504 and "timed out" in resp.json()["detail"]
+
+
+def test_the_tool_registry_follows_the_current_settings(monkeypatch):
+    first = aoce.app.get_tools()
+    assert aoce.app.get_tools() is first
+    monkeypatch.setenv("AOCE_PROMETHEUS_URL", "http://elsewhere:9090")
+    get_settings.cache_clear()
+    assert aoce.app.get_tools() is not first
+
+
+def test_incidents_list_newest_summaries_up_to_limit(monkeypatch):
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: None)
+    ids = client.post("/alerts", json=webhook("firing", "firing", "firing")).json()["incidents"]
+    listed = client.get("/incidents", params={"limit": 2}).json()
+    assert [i["id"] for i in listed] == ids[1:]
+    assert set(listed[0]) == {"id", "received_at", "alertname", "service", "status", "root_cause", "attempts"}
+    assert client.get("/incidents", params={"limit": 0}).status_code == 422
+
+
+def test_a_crashed_investigation_says_why(monkeypatch):
+    class Crashes:
+        async def investigate(self, alert):
+            raise RuntimeError("bug at postgresql://u:pw@db")
+
+        async def aclose(self):
+            pass
+
+    monkeypatch.setattr("aoce.app.make_investigator", lambda: Crashes())
+    with TestClient(app, headers=AUTH) as c:
+        incident_id = c.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+        for _ in range(250):
+            body = c.get(f"/incidents/{incident_id}").json()
+            if body["status"] == "failed":
+                break
+            time.sleep(0.02)
+    assert body["status"] == "failed" and body["error"] == "crashed: RuntimeError (details in the agent log)"
+
+
+def test_a_blank_anthropic_key_skips_investigation(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    get_settings.cache_clear()
+    assert aoce.app.make_investigator() is None
+    incident_id = client.post("/alerts", json=webhook("firing")).json()["incidents"][0]
+    assert INCIDENTS.get(incident_id).status == "skipped"
+
+
+@pytest.mark.parametrize("value", ["", "  "])
+def test_blank_secrets_count_as_unset(monkeypatch, value):
+    from aoce.config import Settings
+
+    for var in ("ANTHROPIC_API_KEY", "AOCE_WEBHOOK_TOKEN", "AOCE_API_KEY", "AOCE_DATABASE_URL", "AOCE_GITHUB_TOKEN"):
+        monkeypatch.setenv(var, value)
+    s = Settings()
+    assert (s.anthropic_api_key, s.webhook_token, s.api_key, s.database_url, s.github_token) == (None,) * 5
+
+
+def test_secrets_are_kept_out_of_reprs_and_dumps(monkeypatch):
+    from aoce.config import Settings
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("AOCE_DATABASE_URL", "postgresql://u:db-secret@db/app")
+    monkeypatch.setenv("AOCE_GITHUB_TOKEN", "ghp-secret")
+    s = Settings()
+    for secret in ("sk-ant-secret", "db-secret", "ghp-secret"):
+        assert secret not in repr(s) and secret not in str(s.model_dump())
+    assert s.anthropic_api_key.get_secret_value() == "sk-ant-secret"

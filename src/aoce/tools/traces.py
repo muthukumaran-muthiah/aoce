@@ -20,7 +20,7 @@ from urllib.parse import quote, urlencode
 
 import httpx
 
-from aoce.tools import Tool, ToolError
+from aoce.tools import Tool, ToolError, ToolInputError
 from aoce.tools.db import _query_text
 from aoce.tools.logs import MASK, redact_log_text
 from aoce.tools.metrics import SERVICE_RE, _parse_end
@@ -303,11 +303,11 @@ async def _search(client: httpx.AsyncClient, params: dict[str, Any]) -> list[dic
 def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -> Tool:
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         service = (args.get("service") or "").strip()
-        if not SERVICE_RE.match(service):
-            raise ToolError(f"invalid service name: {service!r}")
+        if not SERVICE_RE.fullmatch(service):
+            raise ToolInputError(f"invalid service name: {service!r}")
         kind = args.get("kind")
         if kind not in ("error", "slow"):
-            raise ToolError(f"unknown kind: {kind!r}")
+            raise ToolInputError(f"unknown kind: {kind!r}")
         operation = args.get("operation") or None
         try:
             min_duration_ms = args.get("min_duration_ms")
@@ -318,9 +318,9 @@ def get_traces_tool(settings, transport: httpx.AsyncBaseTransport | None = None)
             limit = min(max(int(args.get("limit") or 5), 1), MAX_TRACES)
             minutes = min(max(int(args.get("window_minutes") or 15), 1), 180)
         except (TypeError, ValueError) as e:
-            raise ToolError(f"min_duration_ms, limit and window_minutes must be integers: {e}") from e
+            raise ToolInputError(f"min_duration_ms, limit and window_minutes must be integers: {e}") from e
         if min_duration_ms is not None and min_duration_ms < 0:
-            raise ToolError("min_duration_ms must be zero or more")
+            raise ToolInputError("min_duration_ms must be zero or more")
         end = _parse_end(args.get("end"))
         start = end - timedelta(minutes=minutes)
 

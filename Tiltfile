@@ -124,6 +124,10 @@ AGENT_SETTINGS = {
     'AOCE_JAEGER_PUBLIC_URL': 'http://localhost:8080/jaeger/ui',
     # Demo-only monitoring role from the OTel Demo's init.sql (pg_monitor, read-only use).
     'AOCE_DATABASE_URL': 'postgresql://monitoring_user:monitoring_password@astronomy-db.otel-demo:5432/astronomy_db',
+    # Change history for recent_changes / get_diff (AOCE-28): the repo whose changes are deployed, owner/name.
+    # Unset until AOCE-23 creates the demo's deploy history; the tools then answer "not configured".
+    # Without AOCE_GITHUB_TOKEN GitHub allows 60 requests/hour, and each recent_changes call uses up to 3.
+    'AOCE_GITHUB_REPO': '',
 }
 
 def agent_manifests():
