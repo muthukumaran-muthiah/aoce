@@ -74,3 +74,14 @@ async def test_a_failure_reading_the_server_time_is_a_tool_error(monkeypatch):
     registry = ToolRegistry([db.db_diagnostics_tool(Settings(database_url="postgresql://x"))])
     content, is_error = await registry.run("db_diagnostics", {"check": "connections", "limit": 5})
     assert is_error and content == "database query failed: server closed the connection"
+
+
+async def test_database_errors_are_redacted_before_the_model_sees_them(monkeypatch):
+    async def connect(*args, **kwargs):
+        raise psycopg.OperationalError("connection failed for jane@example.com: password=hunter2")
+
+    monkeypatch.setattr(psycopg.AsyncConnection, "connect", connect)
+    registry = ToolRegistry([db.db_diagnostics_tool(Settings(database_url="postgresql://x"))])
+    content, is_error = await registry.run("db_diagnostics", {"check": "connections", "limit": 5})
+    assert is_error and content.startswith("cannot connect to the database:")
+    assert "jane@example.com" not in content and "hunter2" not in content

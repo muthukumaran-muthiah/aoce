@@ -49,11 +49,12 @@ class Settings(BaseSettings):
     jaeger_public_url: str = "http://localhost:8080/jaeger/ui"
 
     # Application database, read with a monitoring role (AOCE-57)
-    database_url: str | None = None
+    # Usually carries the monitoring role's password, so it is kept out of reprs and dumps.
+    database_url: SecretStr | None = None
 
     # Change history (AOCE-23, AOCE-28)
     github_repo: str | None = None
-    github_token: str | None = None
+    github_token: SecretStr | None = None
 
     @field_validator("anthropic_api_key", "webhook_token", "api_key", "database_url", "github_token", mode="before")
     @classmethod

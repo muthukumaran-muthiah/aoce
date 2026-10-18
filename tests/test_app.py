@@ -441,7 +441,7 @@ def test_incidents_list_newest_summaries_up_to_limit(monkeypatch):
 def test_a_crashed_investigation_says_why(monkeypatch):
     class Crashes:
         async def investigate(self, alert):
-            raise RuntimeError("bug")
+            raise RuntimeError("bug at postgresql://u:pw@db")
 
         async def aclose(self):
             pass
@@ -454,7 +454,7 @@ def test_a_crashed_investigation_says_why(monkeypatch):
             if body["status"] == "failed":
                 break
             time.sleep(0.02)
-    assert body["status"] == "failed" and body["error"] == "crashed: RuntimeError: bug"
+    assert body["status"] == "failed" and body["error"] == "crashed: RuntimeError (details in the agent log)"
 
 
 def test_a_blank_anthropic_key_skips_investigation(monkeypatch):
@@ -475,9 +475,13 @@ def test_blank_secrets_count_as_unset(monkeypatch, value):
     assert (s.anthropic_api_key, s.webhook_token, s.api_key, s.database_url, s.github_token) == (None,) * 5
 
 
-def test_the_anthropic_key_is_kept_out_of_reprs(monkeypatch):
+def test_secrets_are_kept_out_of_reprs_and_dumps(monkeypatch):
     from aoce.config import Settings
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-secret")
+    monkeypatch.setenv("AOCE_DATABASE_URL", "postgresql://u:db-secret@db/app")
+    monkeypatch.setenv("AOCE_GITHUB_TOKEN", "ghp-secret")
     s = Settings()
-    assert "sk-ant-secret" not in repr(s) and s.anthropic_api_key.get_secret_value() == "sk-ant-secret"
+    for secret in ("sk-ant-secret", "db-secret", "ghp-secret"):
+        assert secret not in repr(s) and secret not in str(s.model_dump())
+    assert s.anthropic_api_key.get_secret_value() == "sk-ant-secret"

@@ -20,6 +20,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from aoce.tools import Tool, ToolError, ToolInputError
+from aoce.tools.logs import redact_log_text
 
 STATEMENT_TIMEOUT_MS = 5000
 LARGE_TABLE_ROWS = 1000
@@ -238,6 +239,13 @@ async def _connections(conn, limit: int) -> dict[str, Any]:
     return {"summary": summary, "by_client": by_client, "sql": [CONNECTIONS_SQL.strip(), CONNECTIONS_BY_APP_SQL.strip()]}
 
 
+def _error_text(e: psycopg.Error) -> str:
+    """The server's primary message without the statement context, with secrets and emails masked: it
+    goes to the model and the incident trace (AOCE-69)."""
+    text = (e.diag.message_primary if e.diag else None) or str(e)
+    return redact_log_text(" ".join(text.split()))[:300]
+
+
 RUNNERS = {"slow_queries": _slow_queries, "blocking": _blocking, "seq_scans": _seq_scans, "connections": _connections}
 
 
@@ -251,12 +259,12 @@ def db_diagnostics_tool(settings) -> Tool:
         limit = min(max(int(args.get("limit") or 10), 1), 20)
         try:
             conn = await psycopg.AsyncConnection.connect(
-                settings.database_url,
+                settings.database_url.get_secret_value(),
                 autocommit=True,
                 connect_timeout=5,
             )
         except psycopg.OperationalError as e:
-            raise ToolError(f"cannot connect to the database: {str(e).strip()}") from e
+            raise ToolError(f"cannot connect to the database: {_error_text(e)}") from e
 
         async with conn:
             try:
@@ -264,7 +272,7 @@ def db_diagnostics_tool(settings) -> Tool:
                 results = {name: await RUNNERS[name](conn, limit) for name in checks}
                 checked_at = (await _fetch(conn, "SELECT now() AS now", {}))[0]["now"]
             except psycopg.Error as e:
-                raise ToolError(f"database query failed: {str(e).strip()}") from e
+                raise ToolError(f"database query failed: {_error_text(e)}") from e
             info = conn.info
             return {
                 "database": {"host": info.host, "dbname": info.dbname, "user": info.user},

@@ -212,7 +212,8 @@ async def run_investigation(incident: Incident, investigator: Investigator) -> N
     except Exception as e:
         log.exception("investigation of incident %s crashed", incident.id)
         incident.status = "failed"
-        incident.error = f"crashed: {type(e).__name__}: {e}"[:500]
+        # Only the type: the message can carry connection strings or response bodies; the log has the rest.
+        incident.error = f"crashed: {type(e).__name__} (details in the agent log)"
     log.info("incident %s %s", incident.id, incident.status)
 
 
