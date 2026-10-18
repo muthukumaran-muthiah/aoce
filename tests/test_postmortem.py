@@ -144,6 +144,8 @@ def test_a_resolved_webhook_sets_the_end_time(api, monkeypatch):
         }],
     }
     assert client.post("/alerts", json=resolved).status_code == 202
+    resolved["alerts"][0]["endsAt"] = "2026-10-13T09:00:00Z"  # a re-delivery keeps the first end time
+    assert client.post("/alerts", json=resolved).status_code == 202
     md = client.get("/incidents/abc123/postmortem").text
     assert "Resolved: 2026-10-13 08:20:00 UTC (about 20 min)" in md
 

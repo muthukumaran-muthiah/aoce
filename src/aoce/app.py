@@ -226,7 +226,8 @@ async def receive_alerts(payload: AlertmanagerWebhook, response: Response) -> di
         if alert.status != "firing":
             # Record the end time for the postmortem (AOCE-36). Only a resolved alert counts: a firing
             # alert's endsAt may be a future resolve-timeout, not an end.
-            if (existing := INCIDENTS.find(alert)) is not None:
+            # The first resolved notification wins; Alertmanager may re-deliver the group.
+            if (existing := INCIDENTS.find(alert)) is not None and existing.resolved_at is None:
                 ends_at = alert.ends_at
                 existing.resolved_at = ends_at if ends_at and ends_at.year > 1 else datetime.now(UTC)
             continue
