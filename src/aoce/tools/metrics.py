@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from aoce.tools import Tool, ToolError
+from aoce.tools import Tool, ToolError, ToolInputError
 
 CALLS = "traces_span_metrics_calls_total"
 DURATION_BUCKET = "traces_span_metrics_duration_milliseconds_bucket"
@@ -24,7 +24,8 @@ RATE_WINDOW = f"{RATE_WINDOW_S // 60}m"
 
 MAX_SERIES = 10
 MAX_POINTS = 20
-SERVICE_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+# Use with fullmatch: "$" alone would let a trailing newline through.
+SERVICE_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 
 SIGNAL_UNITS = {"error_rate": "ratio (0-1)", "latency_p95": "milliseconds", "request_rate": "requests/second"}
 
@@ -80,7 +81,7 @@ def build_promql(signal: str, service: str | None) -> str:
         return f"({errors} or {calls} * 0) / {calls}"
     if signal == "latency_p95":
         return f"histogram_quantile(0.95, sum by (service_name, le) (rate({DURATION_BUCKET}{{{selector}}}[{RATE_WINDOW}])))"
-    raise ToolError(f"unknown signal: {signal}")
+    raise ToolInputError(f"unknown signal: {signal}")
 
 
 def _parse_end(end: str | None) -> datetime:
@@ -89,8 +90,9 @@ def _parse_end(end: str | None) -> datetime:
     try:
         parsed = datetime.fromisoformat(end.replace("Z", "+00:00"))
     except ValueError as e:
-        raise ToolError(f"end is not an ISO-8601 timestamp: {end!r}") from e
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        raise ToolInputError(f"end is not an ISO-8601 timestamp: {end!r}") from e
+    # In UTC, so the window and the graph link (which Prometheus reads as UTC) agree.
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _downsample(points: list[tuple[float, float]], n: int) -> list[tuple[float, float]]:
@@ -110,9 +112,11 @@ def summarise(series: dict[str, Any], window_start: float) -> dict[str, Any]:
 
     baseline_avg = fmean(baseline) if baseline else None
     window_avg = fmean(window) if window else None
+    # A ratio has no value when the baseline is 0, so a rise from nothing is flagged separately.
     change = None
     if baseline_avg and window_avg is not None:
         change = round(window_avg / baseline_avg, 2)
+    rose_from_zero = baseline_avg == 0 and window_avg is not None and window_avg > 0
     return {
         "labels": series["metric"],
         "baseline_avg": rnd(baseline_avg),
@@ -120,6 +124,7 @@ def summarise(series: dict[str, Any], window_start: float) -> dict[str, Any]:
         "window_max": rnd(max(window) if window else None),
         "latest": rnd(points[-1][1] if points else None),
         "change_vs_baseline": change,
+        "rose_from_zero": rose_from_zero,
         "series": [
             [datetime.fromtimestamp(t, UTC).strftime("%H:%M:%S"), rnd(v)]
             for t, v in _downsample([p for p in points if p[0] >= window_start], MAX_POINTS)
@@ -127,16 +132,22 @@ def summarise(series: dict[str, Any], window_start: float) -> dict[str, Any]:
     }
 
 
+def _redact(text: str) -> str:
+    from aoce.tools.logs import redact_log_text  # logs imports this module
+
+    return redact_log_text(text)
+
+
 def query_metrics_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -> Tool:
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         signal = args["signal"]
         service = args.get("service") or None
-        if service and not SERVICE_RE.match(service):
-            raise ToolError(f"invalid service name: {service!r}")
+        if service and not SERVICE_RE.fullmatch(service):
+            raise ToolInputError(f"invalid service name: {service!r}")
         if signal == "promql":
             promql = (args.get("promql") or "").strip()
             if not promql:
-                raise ToolError("signal 'promql' needs a promql expression")
+                raise ToolInputError("signal 'promql' needs a promql expression")
         else:
             promql = build_promql(signal, service)
 
@@ -144,8 +155,9 @@ def query_metrics_tool(settings, transport: httpx.AsyncBaseTransport | None = No
         end = _parse_end(args.get("end"))
         window_start = end - timedelta(minutes=minutes)
         start = window_start - timedelta(minutes=minutes)
-        # Step in seconds: ~120 points over the 2x range, capped at the rate window so no samples fall
-        # between evaluations.
+        # Step in seconds: one per minute of window, so 2 * 60 = 120 points over the 2x range (from 60s at
+        # 5 minutes up to 360 points at 120+), clamped to 15s-RATE_WINDOW_S so no samples fall between
+        # evaluations.
         step = min(max(15, minutes), RATE_WINDOW_S)
 
         params = {"query": promql, "start": start.timestamp(), "end": end.timestamp(), "step": step}
@@ -153,10 +165,17 @@ def query_metrics_tool(settings, transport: httpx.AsyncBaseTransport | None = No
             async with httpx.AsyncClient(base_url=settings.prometheus_url, timeout=15, transport=transport) as client:
                 resp = await client.get("/api/v1/query_range", params=params)
         except httpx.HTTPError as e:
-            raise ToolError(f"Prometheus unreachable at {settings.prometheus_url}: {e}") from e
-        body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            # No URL or raw error text: it goes to the model and could carry credentials (user:pass@host).
+            raise ToolError(f"Prometheus unreachable: {type(e).__name__}") from e
+        try:
+            body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        except ValueError:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
         if resp.status_code != 200 or body.get("status") != "success":
-            raise ToolError(f"Prometheus error ({resp.status_code}): {body.get('error', resp.text[:300])}")
+            error = body.get("error") or resp.text
+            raise ToolError(f"Prometheus error ({resp.status_code}): {_redact(str(error))[:300]}")
 
         results = [summarise(s, window_start.timestamp()) for s in body["data"]["result"]]
         results.sort(key=lambda r: r["window_max"] if r["window_max"] is not None else float("-inf"), reverse=True)

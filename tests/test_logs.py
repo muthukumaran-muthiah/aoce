@@ -149,7 +149,7 @@ async def test_no_matches_is_not_an_error():
     "overrides, message",
     [
         ({"service": 'cart" OR *'}, "invalid service name"),
-        ({"min_severity": "loud"}, "unknown min_severity"),
+        ({"min_severity": "loud"}, "input.min_severity: must be one of"),
         ({"end": "yesterday"}, "not an ISO-8601"),
     ],
 )
@@ -290,3 +290,17 @@ async def test_opensearch_error_text_is_redacted():
 def test_non_card_numbers_stay_readable():
     text = "order 1729181234567 took 120 ms, trace 4bf92f3577b34da6a3ce929d0e0e4736"
     assert redact_log_text(text) == text
+
+
+def test_a_huge_body_is_cut_before_it_is_redacted(monkeypatch):
+    from aoce.tools import logs
+
+    seen = []
+    real = logs.redact_log_text
+    monkeypatch.setattr(logs, "redact_log_text", lambda text: seen.append(len(text)) or real(text))
+    cut = logs._cut("x" * 1_000_000 + " token=abc", logs.BODY_CHARS)
+    assert seen == [logs.BODY_CHARS + logs.REDACT_MARGIN]
+    assert cut == "x" * logs.BODY_CHARS + "…"
+    # A secret straddling the cut is still masked, not left half visible.
+    cut = logs._cut("y" * (logs.BODY_CHARS - 10) + " password=hunter2hunter2", logs.BODY_CHARS)
+    assert "hunter" not in cut

@@ -135,10 +135,12 @@ async def test_step_limit_asks_for_a_report():
         response(tool_use("echo", {"x": "b", "hypothesis": "h"})),
         response(tool_use(FINISH, {**REPORT, "root_cause": None, "confidence": "low"})),
     )
-    result = await Investigator(llm, registry(), settings(investigation_max_steps=2)).investigate(ALERT)
+    result = await Investigator(llm, registry(), settings(investigation_max_steps=3)).investigate(ALERT)
     nudge = llm.calls[2][-1]["content"][-1]
     assert nudge["type"] == "text" and "max_steps" in nudge["text"]
     assert result.status == "inconclusive" and result.stop_reason == "finished"
+    # The wrap-up turn is the last of max_steps model calls, not one more (AOCE-69).
+    assert len(llm.calls) == result.steps == 3
 
 
 async def test_ignoring_the_wrap_up_ends_inconclusive():
@@ -465,3 +467,51 @@ async def test_a_failing_audit_does_not_change_the_tool_result(monkeypatch):
 
     monkeypatch.setattr("aoce.audit.record", broken)
     assert await registry().run("echo", {"x": "hi"}) == ('{"x": "hi"}', False)
+
+
+# AOCE-69 edge cases.
+
+
+async def test_a_hard_timeout_mid_batch_keeps_the_calls_that_finished():
+    llm = FakeLLM(
+        response(
+            tool_use("echo", {"x": "a", "hypothesis": "fast"}, "t1"),
+            tool_use("echo", {"x": "slow", "hypothesis": "slow"}, "t2"),
+        )
+    )
+    s = settings(investigation_timeout_s=0.3, tool_timeout_s=5)
+    result = await Investigator(llm, registry(), s).investigate(ALERT)
+    assert result.stop_reason == "timeout"
+    assert [c.hypothesis for c in result.trace] == ["fast"]
+    assert result.report["hypotheses"][0]["statement"] == "fast"
+
+
+async def test_tool_calls_in_one_turn_run_at_most_four_at_a_time():
+    from aoce.investigation import MAX_PARALLEL_TOOL_CALLS
+
+    running = peak = 0
+
+    async def probe(tool_input):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0.02)
+        running -= 1
+        return {}
+
+    schema = {"type": "object", "properties": {}, "required": [], "additionalProperties": False}
+    reg = ToolRegistry([Tool("probe", "probe", schema, probe)])
+    calls = [tool_use("probe", {"hypothesis": "h"}, f"t{i}") for i in range(10)]
+    llm = FakeLLM(response(*calls), response(tool_use(FINISH, REPORT, "done")))
+    result = await Investigator(llm, reg, settings()).investigate(ALERT)
+    assert len(result.trace) == 10 and peak == MAX_PARALLEL_TOOL_CALLS == 4
+    # Results still go back in the order the model asked for them.
+    assert [b["tool_use_id"] for b in llm.calls[1][2]["content"]] == [f"t{i}" for i in range(10)]
+
+
+async def test_cache_reads_count_at_a_tenth_against_the_token_budget():
+    reply = response(tool_use(FINISH, REPORT), tokens=100)
+    reply.usage.cache_read_input_tokens = 10_000
+    reply.usage.output_tokens = 50
+    result = await Investigator(FakeLLM(reply), registry(), settings()).investigate(ALERT)
+    assert result.tokens_used == 100 + 50 + 1_000

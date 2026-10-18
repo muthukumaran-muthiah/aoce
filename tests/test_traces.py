@@ -185,9 +185,10 @@ async def test_error_search_falls_back_to_scanning_recent_traces():
         ({"service": ""}, "invalid service name"),
         ({"min_duration_ms": -1}, "zero or more"),
         ({"end": "yesterday"}, "not an ISO-8601"),
-        ({"limit": "five"}, "must be integers"),
-        ({"min_duration_ms": 0.9}, "not a whole number"),
-        ({"min_duration_ms": True}, "not a whole number"),
+        # Wrong JSON types are caught by the schema check before the handler runs.
+        ({"limit": "five"}, "input.limit: expected integer"),
+        ({"min_duration_ms": 0.9}, "input.min_duration_ms: expected integer or null"),
+        ({"min_duration_ms": True}, "input.min_duration_ms: expected integer or null"),
     ],
 )
 async def test_bad_input_is_reported_to_the_model(overrides, message):

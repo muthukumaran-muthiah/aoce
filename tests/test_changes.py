@@ -162,13 +162,14 @@ async def test_get_diff_compares_two_refs():
         ("get_diff", {"ref": "v1.4.0", "base": "v1."}, "invalid base"),
         ("recent_changes", changes_args(path="../etc"), "invalid path"),
         ("recent_changes", changes_args(end="yesterday"), "not an ISO-8601"),
-        ("recent_changes", changes_args(window_minutes="abc"), "must be an integer"),
+        ("recent_changes", changes_args(window_minutes="abc"), "input.window_minutes: expected integer"),
     ],
 )
 async def test_bad_input_is_reported_without_calling_github(tool, tool_args, message):
     reg, seen = registry(ROUTES)
-    content, is_error = await reg.run(tool, tool_args)
-    assert is_error and message in content
+    outcome = await reg.call(tool, tool_args)
+    assert outcome.is_error and message in outcome.content
+    assert outcome.bad_input  # so POST /tools answers 422, not 502 (AOCE-69)
     assert not seen
 
 

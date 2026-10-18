@@ -42,7 +42,9 @@ class LLMRefusalError(RuntimeError):
 class LLMClient:
     def __init__(self, settings: Settings, client: anthropic.AsyncAnthropic | None = None) -> None:
         self.settings = settings
-        self._client = client or anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        self._client = client or anthropic.AsyncAnthropic(
+            api_key=settings.anthropic_api_key.get_secret_value() if settings.anthropic_api_key else None
+        )
         self._send_effort = settings.send_effort
         if self._send_effort is None:
             self._send_effort = bool(_EFFORT_MODEL_RE.search(settings.model))

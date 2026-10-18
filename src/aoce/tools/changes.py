@@ -13,7 +13,7 @@ from typing import Any
 
 import httpx
 
-from aoce.tools import Tool, ToolError
+from aoce.tools import Tool, ToolError, ToolInputError
 
 API_URL = "https://api.github.com"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.\-]+/[A-Za-z0-9_.\-]+$")
@@ -82,8 +82,8 @@ def _parse_end(end: str | None) -> datetime:
     try:
         parsed = datetime.fromisoformat(end.replace("Z", "+00:00"))
     except ValueError as e:
-        raise ToolError(f"end is not an ISO-8601 timestamp: {end!r}") from e
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+        raise ToolInputError(f"end is not an ISO-8601 timestamp: {end!r}") from e
+    return parsed.astimezone(UTC) if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _parse_time(value: str | None) -> datetime | None:
@@ -146,11 +146,11 @@ def recent_changes_tool(settings, transport: httpx.AsyncBaseTransport | None = N
         repo = gh.check()
         path = args.get("path") or None
         if path and not PATH_RE.match(path):
-            raise ToolError(f"invalid path: {path!r}")
+            raise ToolInputError(f"invalid path: {path!r}")
         try:
             minutes = min(max(int(args.get("window_minutes") or 60), 5), 1440)
         except (TypeError, ValueError) as e:
-            raise ToolError(f"window_minutes must be an integer: {args.get('window_minutes')!r}") from e
+            raise ToolInputError(f"window_minutes must be an integer: {args.get('window_minutes')!r}") from e
         end = _parse_end(args.get("end"))
         start = end - timedelta(minutes=minutes)
 
@@ -266,7 +266,7 @@ def get_diff_tool(settings, transport: httpx.AsyncBaseTransport | None = None) -
         base = (args.get("base") or "").strip() or None
         for name, value in (("ref", ref), ("base", base)):
             if value is not None and not REF_RE.match(value):
-                raise ToolError(f"invalid {name}: {value!r}")
+                raise ToolInputError(f"invalid {name}: {value!r}")
 
         async with gh.client() as client:
             if base:
