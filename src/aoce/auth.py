@@ -19,7 +19,13 @@ log = logging.getLogger("aoce")
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _require(env_var: str, secret_of: Callable[[Settings], SecretStr | None]):
+SecretOf = Callable[[Settings], SecretStr | None]
+SECRETS: dict[str, SecretOf] = {"AOCE_WEBHOOK_TOKEN": lambda s: s.webhook_token, "AOCE_API_KEY": lambda s: s.api_key}
+
+
+def _require(env_var: str):
+    secret_of = SECRETS[env_var]
+
     async def check(credentials: HTTPAuthorizationCredentials | None = Depends(_bearer)) -> None:
         expected = secret_of(get_settings())
         if expected is None or not expected.get_secret_value():
@@ -35,9 +41,6 @@ def _require(env_var: str, secret_of: Callable[[Settings], SecretStr | None]):
     return check
 
 
-SECRETS = {"AOCE_WEBHOOK_TOKEN": lambda s: s.webhook_token, "AOCE_API_KEY": lambda s: s.api_key}
-
-
 def warn_unset_secrets(settings: Settings) -> None:
     """Log each unset secret once at startup rather than on every rejected request (AOCE-69)."""
     for env_var, secret_of in SECRETS.items():
@@ -46,5 +49,5 @@ def warn_unset_secrets(settings: Settings) -> None:
             log.warning("%s is not set, so its endpoints are turned off", env_var)
 
 
-require_webhook_token = _require("AOCE_WEBHOOK_TOKEN", lambda s: s.webhook_token)
-require_api_key = _require("AOCE_API_KEY", lambda s: s.api_key)
+require_webhook_token = _require("AOCE_WEBHOOK_TOKEN")
+require_api_key = _require("AOCE_API_KEY")

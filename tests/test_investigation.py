@@ -224,7 +224,9 @@ async def test_only_transient_api_errors_are_retryable(status, retryable):
     import httpx
 
     error = anthropic.APIStatusError(
-        "boom", response=httpx.Response(status, request=httpx.Request("POST", "https://api")), body=None
+        "boom from https://u:secret@proxy",
+        response=httpx.Response(status, request=httpx.Request("POST", "https://api"), headers={"request-id": "req_9"}),
+        body=None,
     )
 
     class FailingLLM:
@@ -233,6 +235,8 @@ async def test_only_transient_api_errors_are_retryable(status, retryable):
 
     result = await Investigator(FailingLLM(), registry(), settings()).investigate(ALERT)
     assert result.status == "failed" and result.retryable is retryable
+    # Only the type, status and request id reach the incident; the message stays in the log (AOCE-69).
+    assert result.error == f"APIStatusError (HTTP {status}, request_id=req_9); details in the agent log"
 
 
 async def test_a_truncated_finish_is_retried_not_stored():

@@ -164,6 +164,17 @@ class InvestigationResult(BaseModel):
     retryable: bool = False
 
 
+def _error_summary(e: Exception) -> str:
+    """What GET /incidents shows: our own refusal text, else only the API error's type and status. Its
+    message can echo request or response bodies; the log keeps it (AOCE-69)."""
+    if isinstance(e, LLMRefusalError):
+        return str(e)
+    summary = type(e).__name__
+    if isinstance(e, anthropic.APIStatusError):
+        summary += f" (HTTP {e.status_code}, request_id={e.request_id})"
+    return summary + "; details in the agent log"
+
+
 def _transient(e: Exception) -> bool:
     if isinstance(e, anthropic.APIConnectionError):
         return True
@@ -286,7 +297,7 @@ class Investigator:
             if state.report is None:
                 state.report = fallback_report(state, self.tools, "timeout")
         except (LLMRefusalError, anthropic.APIError) as e:
-            state.status, state.stop_reason, state.error = "failed", "error", str(e)
+            state.status, state.stop_reason, state.error = "failed", "error", _error_summary(e)
             state.retryable = _transient(e)
             log.warning("investigation failed: %s", e)
         return state
