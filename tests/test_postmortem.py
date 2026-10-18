@@ -70,9 +70,9 @@ def test_concluded_incident_has_every_section():
         assert heading in md
     assert "Product catalog queries wait on a table lock." in md  # newlines folded
     assert "A long transaction holds a lock on products. (confidence: high)" in md
-    assert "- **confirmed**: Lock contention in Postgres\n  - db_diagnostics: 12 waiters" in md
+    assert "- **confirmed**: Lock contention in Postgres\n  - db\\_diagnostics: 12 waiters" in md
     assert "- [ ] Terminate the blocking backend" in md
-    assert "- [ ] Check get_traces, which the agent did not." in md
+    assert "- [ ] Not checked by the agent: get\\_traces" in md
     assert "severity page" in md
     assert "Resolved: not recorded" in md  # no resolved webhook, whatever the firing endsAt says
     assert "Alert resolved." not in md
@@ -95,6 +95,17 @@ def test_webhook_times_are_shown_in_utc():
     md = render_postmortem(make_incident(starts_at="2026-10-13T08:00:00", resolved_at="2026-10-13T10:20:00+02:00"))
     assert "Started: 2026-10-13 08:00:00 UTC" in md  # no offset: taken as UTC
     assert "Resolved: 2026-10-13 08:20:00 UTC (about 20 min)" in md
+
+
+def test_untrusted_text_cannot_add_images_links_or_headings():
+    payload = "# Fixed ![](https://attacker.example/?d=1) [click](javascript:alert(1)) <img src=x>"
+    report = {**REPORT, "summary": payload, "hypotheses": [{"statement": "s", "status": "confirmed", "evidence": [payload]}]}
+    incident = make_incident(report=report)
+    incident.alert.labels["alertname"] = "![](https://attacker.example/a)"
+    md = render_postmortem(incident)
+    for raw in ("![", "[click]", " <img", "\n# Fixed"):
+        assert raw not in md
+    assert "\\# Fixed \\!\\[\\](https://attacker.example/?d=1)" in md
 
 
 def test_fallback_report_says_no_root_cause_was_found():

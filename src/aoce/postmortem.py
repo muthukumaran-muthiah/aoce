@@ -9,6 +9,7 @@ the action items is not done here.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -32,9 +33,20 @@ def _utc(at: datetime) -> datetime:
     return at.replace(tzinfo=UTC) if at.tzinfo is None else at.astimezone(UTC)
 
 
+# Markdown that could turn untrusted text into a link, image, HTML, code or table cell.
+_MARKDOWN = re.compile(r"([\\`*_\[\]<>!|~#])")
+# A list marker or setext underline at the start of a paragraph (summary, root cause).
+_LEADING = re.compile(r"^([-+=]|\d+(?=[.)]))")
+
+
 def _one_line(text: Any) -> str:
-    """Model and label text on a single Markdown line: newlines folded, no stray list or heading."""
-    return " ".join(str(text).split())
+    """Untrusted text (alert labels, model output) as one inert Markdown line.
+
+    Newlines are folded and Markdown punctuation is escaped, so a value steered by a log line cannot
+    add an image fetch, a link or a heading to a document that gets pasted into tickets.
+    """
+    escaped = _MARKDOWN.sub(r"\\\1", " ".join(str(text).split()))
+    return _LEADING.sub(lambda m: f"\\{m[0]}" if not m[0].isdigit() else m[0] + "\\", escaped)
 
 
 def _resolved_at(incident: Incident) -> datetime | None:
@@ -104,7 +116,7 @@ def render_postmortem(incident: Incident) -> str:
     actions = []
     if recommended := report.get("recommended_action"):
         actions.append(_one_line(recommended))
-    actions += [f"Check {_one_line(item)}, which the agent did not." for item in report.get("not_checked", [])]
+    actions += [f"Not checked by the agent: {_one_line(item)}" for item in report.get("not_checked", [])]
     if not root_cause:
         actions.append("Find the root cause by hand; the agent did not establish one.")
     lines += [f"- [ ] {action}" for action in actions]
