@@ -172,3 +172,14 @@ def test_endpoint_unknown_incident_and_auth(api):
     assert client.get("/incidents/nope/postmortem").status_code == 404
     INCIDENTS.add(make_incident(), 10)
     assert TestClient(app).get("/incidents/abc123/postmortem").status_code == 401
+
+
+def test_a_retry_keeps_the_resolved_time(api):
+    from aoce.app import open_incident_for
+
+    failed = make_incident(status="failed", report=None, resolved_at="2026-10-13T08:20:00Z")
+    failed.retryable = True
+    INCIDENTS.add(failed, 10)
+    retry = open_incident_for(failed.alert)
+    assert retry is not None and retry.attempts == 2
+    assert retry.resolved_at == failed.resolved_at
