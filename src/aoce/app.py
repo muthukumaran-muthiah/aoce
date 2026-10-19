@@ -242,6 +242,7 @@ def open_incident_for(alert: Alert) -> Incident | None:
         alert=alert,
         attempts=existing.attempts + 1,
         audit=list(existing.audit),  # earlier attempts' calls stay visible on the replacement (AOCE-40)
+        resolved_at=existing.resolved_at,  # a resolve that already arrived still ends the postmortem (AOCE-36)
     )
 
 
